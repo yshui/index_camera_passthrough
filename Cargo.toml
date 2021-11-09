@@ -14,6 +14,14 @@ openvr_sys = { path = "openvr_sys" }
 ctrlc = "3.2.1"
 log = "0.4.14"
 env_logger = "0.9.0"
-
+v4l = { path = "libv4l-rs" }
+udev = "0.6.2"
+vulkano-shaders = "0.26.0"
+thiserror = "1.0.30"
+renderdoc = "0.10.1"
 
 [features]
+
+[build-dependencies]
+anyhow = "1.0.45"
+shaderc = "0.7.3"
