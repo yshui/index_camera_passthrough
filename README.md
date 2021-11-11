@@ -22,7 +22,7 @@ Also the lens distortion parameters of the camera is hard coded. Ideally every I
 
 To build this program, you need:
 
-* Rust ([How to install](https://www.rust-lang.org/tools/install))
+* Rust ([How to install](https://www.rust-lang.org/tools/install), you need to select the nightly channel)
 * OpenVR
 * Vulkan
 
