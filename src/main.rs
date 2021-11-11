@@ -217,5 +217,6 @@ fn main() -> Result<()> {
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
+
     Ok(())
 }

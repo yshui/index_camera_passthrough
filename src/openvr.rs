@@ -8,8 +8,9 @@ use vulkano::{
 };
 use anyhow::{anyhow, Result};
 use std::sync::Arc;
+use std::cell::Cell;
 
-pub struct VRSystem(*mut openvr_sys::IVRSystem);
+pub struct VRSystem(*mut openvr_sys::IVRSystem, Cell<Option<Arc<Device>>>);
 pub struct VRCompositor<'a>(
     *mut openvr_sys::IVRCompositor,
     PhantomData<&'a openvr_sys::IVRSystem>,
@@ -65,13 +66,16 @@ impl VRSystem {
             )
         };
         error.into_result()?;
-        Ok(Self(isystem_raw))
+        Ok(Self(isystem_raw, Cell::new(None)))
     }
     pub fn overlay<'a>(&'a self) -> VROverlay<'a> {
-        VROverlay(openvr_sys::VROverlay(), PhantomData)
+        VROverlay(openvr_sys::VROverlay(), self)
     }
     pub fn compositor<'a>(&'a self) -> VRCompositor<'a> {
         VRCompositor(openvr_sys::VRCompositor(), PhantomData)
+    }
+    fn hold_vulkan_device(&self, device: Arc<Device>) {
+        self.1.replace(Some(device));
     }
     pub fn pin_mut(&self) -> Pin<&mut openvr_sys::IVRSystem> {
         unsafe { Pin::new_unchecked(&mut *self.0) }
@@ -80,7 +84,7 @@ impl VRSystem {
 
 pub struct VROverlay<'a>(
     *mut openvr_sys::IVROverlay,
-    PhantomData<&'a openvr_sys::IVRSystem>,
+    &'a VRSystem
 );
 
 impl<'a> VROverlay<'a> {
@@ -151,6 +155,9 @@ impl<'a> VROverlayHandle<'a> {
             _instance: instance.clone(),
         };
         self.texture.replace(texture);
+        // Once we set a texture, the VRSystem starts to depend on Vulkan
+        // instance being alive.
+        self.ivr_overlay.1.hold_vulkan_device(dev.clone());
         let mut vrimage = openvr_sys::VRVulkanTextureData_t {
             m_nWidth: w,
             m_nHeight: h,
@@ -181,6 +188,7 @@ impl<'a> VROverlayHandle<'a> {
 
 impl<'a> Drop for VROverlayHandle<'a> {
     fn drop(&mut self) {
+        log::info!("Dropping overlay handle");
         if let Err(e) = unsafe { self.ivr_overlay.destroy_overlay_raw(self.raw) } {
             eprintln!("{}", e.to_string());
         }
@@ -189,6 +197,7 @@ impl<'a> Drop for VROverlayHandle<'a> {
 
 impl Drop for VRSystem {
     fn drop(&mut self) {
+        log::info!("Shutdown OpenVR");
         openvr_sys::VR_Shutdown();
     }
 }
