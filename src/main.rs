@@ -40,7 +40,6 @@ fn find_index_camera() -> Result<std::path::PathBuf> {
 
 fn main() -> Result<()> {
     env_logger::init();
-    let mut rd = renderdoc::RenderDoc::<renderdoc::V100>::new()?;
     let camera = v4l::Device::with_path(find_index_camera()?)?;
     if !camera
         .query_caps()?
@@ -52,6 +51,7 @@ fn main() -> Result<()> {
     let format = camera.set_format(&v4l::Format::new(1920, 960, v4l::FourCC::new(b"YUYV")))?;
     log::info!("{}", format);
     camera.set_params(&v4l::video::capture::Parameters::with_fps(54))?;
+    // We want to make the latency as low as possible, so only set a single buffer.
     let mut video_stream =
         v4l::prelude::MmapStream::with_buffers(&camera, v4l::buffer::Type::VideoCapture, 1)?;
 
