@@ -2,9 +2,7 @@ use anyhow::{anyhow, Result};
 use std::sync::Arc;
 use vulkano::{
     buffer::{BufferUsage, CpuAccessibleBuffer, CpuBufferPool, TypedBufferAccess},
-    command_buffer::{
-        AutoCommandBufferBuilder, CommandBufferUsage::OneTimeSubmit,
-    },
+    command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage::OneTimeSubmit},
     command_buffer::{CopyBufferImageError, SubpassContents},
     descriptor_set::{persistent::PersistentDescriptorSet, DescriptorSetError},
     device::{Device, Queue},
@@ -72,12 +70,7 @@ pub struct GpuYuyvConverter {
 /// know if it's widely supported. And the image format we need (G8B8G8R8_422_UNORM)
 /// seems to have even less support than the extension itself.
 impl GpuYuyvConverter {
-    pub fn new(
-        device: Arc<Device>,
-        output: Arc<AttachmentImage>,
-        w: u32,
-        h: u32,
-    ) -> Result<Self> {
+    pub fn new(device: Arc<Device>, output: Arc<AttachmentImage>, w: u32, h: u32) -> Result<Self> {
         if w % 2 != 0 {
             return Err(anyhow!("Width can't be odd"));
         }

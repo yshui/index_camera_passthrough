@@ -169,11 +169,15 @@ fn main() -> Result<()> {
         0.428,
     )?;
 
-
     let mut event = std::mem::MaybeUninit::<openvr_sys::VREvent_t>::uninit();
     'main_loop: loop {
         let (frame, _metadata) = v4l::io::traits::CaptureStream::next(&mut video_stream)?;
-        let future = converter.yuyv_buffer_to_vulkan_image(frame, vulkano::sync::now(device.clone()), queue.clone(), &buffer)?;
+        let future = converter.yuyv_buffer_to_vulkan_image(
+            frame,
+            vulkano::sync::now(device.clone()),
+            queue.clone(),
+            &buffer,
+        )?;
         let (future, image) = correction.correct(future, queue.clone())?;
         future.then_signal_fence().wait(None)?;
 

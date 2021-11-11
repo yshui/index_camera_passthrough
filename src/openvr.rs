@@ -1,14 +1,14 @@
+use anyhow::{anyhow, Result};
+use std::cell::Cell;
+use std::sync::Arc;
 /// Incomplete set of OpenVR wrappeprs.
 use std::{marker::PhantomData, pin::Pin};
 use vulkano::{
     device::{physical::PhysicalDevice, Device, Queue},
     image::ImageAccess,
     instance::Instance,
-    SynchronizedVulkanObject, VulkanObject, Handle
+    Handle, SynchronizedVulkanObject, VulkanObject,
 };
-use anyhow::{anyhow, Result};
-use std::sync::Arc;
-use std::cell::Cell;
 
 pub struct VRSystem(*mut openvr_sys::IVRSystem, Cell<Option<Arc<Device>>>);
 pub struct VRCompositor<'a>(
@@ -82,10 +82,7 @@ impl VRSystem {
     }
 }
 
-pub struct VROverlay<'a>(
-    *mut openvr_sys::IVROverlay,
-    &'a VRSystem
-);
+pub struct VROverlay<'a>(*mut openvr_sys::IVROverlay, &'a VRSystem);
 
 impl<'a> VROverlay<'a> {
     pub fn pin_mut(&self) -> Pin<&mut openvr_sys::IVROverlay> {
