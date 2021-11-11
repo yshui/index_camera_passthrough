@@ -1,3 +1,6 @@
 [submodule "libv4l-rs"]
 	path = libv4l-rs
 	url = https://github.com/raymanfx/libv4l-rs
+[submodule "autocxx"]
+	path = autocxx
+	url = https://github.com/yshui/autocxx
