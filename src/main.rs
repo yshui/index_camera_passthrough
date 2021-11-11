@@ -53,7 +53,7 @@ fn main() -> Result<()> {
     camera.set_params(&v4l::video::capture::Parameters::with_fps(54))?;
     // We want to make the latency as low as possible, so only set a single buffer.
     let mut video_stream =
-        v4l::prelude::MmapStream::with_buffers(&camera, v4l::buffer::Type::VideoCapture, 1)?;
+        v4l::prelude::MmapStream::with_buffers(&camera, v4l::buffer::Type::VideoCapture, 2)?;
 
     let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
     let r = running.clone();
