@@ -219,7 +219,6 @@ fn main() -> Result<()> {
         if !running.load(std::sync::atomic::Ordering::Relaxed) {
             break;
         }
-        std::thread::sleep(std::time::Duration::from_millis(20));
     }
 
     Ok(())
