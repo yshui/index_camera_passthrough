@@ -1,6 +1,7 @@
-#![feature(untagged_unions, try_trait_v2)]
+#![feature(untagged_unions, try_trait_v2, destructuring_assignment)]
 mod distortion_correction;
 mod openvr;
+mod projection;
 mod yuv;
 
 use anyhow::{anyhow, Context, Result};
@@ -10,12 +11,15 @@ use v4l::video::Capture;
 use vulkano::{
     buffer::CpuBufferPool,
     device::{self, physical::PhysicalDevice},
+    image::ImageUsage,
     instance::{Instance, InstanceExtensions, Version},
     sync::GpuFuture,
     VulkanObject,
 };
 use yuv::GpuYuyvConverter;
-
+/// Camera image will be (size * 2, size)
+const CAMERA_SIZE: u32 = 960;
+const FOV: f32 = 0.428;
 #[allow(unused_imports)]
 use log::info;
 
@@ -39,6 +43,7 @@ fn find_index_camera() -> Result<std::path::PathBuf> {
 }
 
 fn main() -> Result<()> {
+    let mut rd = renderdoc::RenderDoc::<renderdoc::V100>::new()?;
     env_logger::init();
     let camera = v4l::Device::with_path(find_index_camera()?)?;
     if !camera
@@ -48,7 +53,11 @@ fn main() -> Result<()> {
     {
         return Err(anyhow!("Cannot capture from index camera"));
     }
-    let format = camera.set_format(&v4l::Format::new(1920, 960, v4l::FourCC::new(b"YUYV")))?;
+    let format = camera.set_format(&v4l::Format::new(
+        CAMERA_SIZE * 2,
+        CAMERA_SIZE,
+        v4l::FourCC::new(b"YUYV"),
+    ))?;
     log::info!("{}", format);
     camera.set_params(&v4l::video::capture::Parameters::with_fps(54))?;
     // We want to make the latency as low as possible, so only set a single buffer.
@@ -142,49 +151,111 @@ fn main() -> Result<()> {
             &transformation,
         )
     };
+    let overlay_model = transformation.into();
 
-    // Set up post-processing passes
-    let converted = vulkano::image::AttachmentImage::with_usage(
+    // Allocate intermediate textures
+    let textures: Result<Vec<_>> = (0..2)
+        .map(|_| {
+            vulkano::image::AttachmentImage::with_usage(
+                device.clone(),
+                [CAMERA_SIZE * 2, CAMERA_SIZE],
+                vulkano::format::Format::R8G8B8A8_UNORM,
+                ImageUsage {
+                    transfer_source: true,
+                    transfer_destination: true,
+                    sampled: true,
+                    color_attachment: true,
+                    ..ImageUsage::none()
+                },
+            )
+            .map_err(|e| e.into())
+        })
+        .collect();
+    let textures = textures?;
+
+    // Create post-processing stages
+    //
+    // Camera data -> upload -> internal texture
+    // internal texture -> YUYV conversion -> textures[0]
+    // textures[0] -> Lens correction -> textures[1]
+    // textures[1] -> projection -> Final output
+    let converter = GpuYuyvConverter::new(device.clone(), CAMERA_SIZE * 2, CAMERA_SIZE)?;
+    let (correction, fov) = distortion_correction::StereoCorrection::new(
         device.clone(),
-        [1920, 960],
-        vulkano::format::Format::R8G8B8A8_UNORM,
-        vulkano::image::ImageUsage {
-            transfer_source: true,
-            transfer_destination: false,
-            sampled: true,
-            storage: false,
-            color_attachment: true,
-            depth_stencil_attachment: false,
-            transient_attachment: false,
-            input_attachment: false,
-        },
-    )?;
-    let converter = GpuYuyvConverter::new(device.clone(), converted.clone(), 1920, 960)?;
-    let correction = distortion_correction::StereoCorrection::new(
-        device.clone(),
-        converted,
+        textures[0].clone(),
         [-0.17, 0.021, -0.001],
         [483.4, 453.6],
         [489.2, 473.7],
-        0.428,
+        FOV,
     )?;
+    let projector = projection::Projection::new(device.clone(), textures[1].clone())?;
+    log::info!("Adjusted FOV: {}", fov);
 
-    let mut event = std::mem::MaybeUninit::<openvr_sys::VREvent_t>::uninit();
+    // Fetch the first camera frame
+    let (mut frame, mut metadata) = v4l::io::traits::CaptureStream::next(&mut video_stream)?;
+    let first_frame_instant = std::time::Instant::now();
+    let first_frame_timestamp: std::time::Duration = metadata.timestamp.into();
+    let mut capture = false;
     'main_loop: loop {
-        let (frame, _metadata) = v4l::io::traits::CaptureStream::next(&mut video_stream)?;
+        // Allocate final image
+        let output = vulkano::image::AttachmentImage::with_usage(
+            device.clone(),
+            [CAMERA_SIZE * 2, CAMERA_SIZE],
+            vulkano::format::Format::R8G8B8A8_UNORM,
+            vulkano::image::ImageUsage {
+                transfer_source: true,
+                transfer_destination: true,
+                sampled: true,
+                storage: false,
+                color_attachment: true,
+                depth_stencil_attachment: false,
+                transient_attachment: false,
+                input_attachment: false,
+            },
+        )?;
+
+        if capture {
+            log::info!("Start Capture");
+            rd.start_frame_capture(std::ptr::null(), std::ptr::null());
+        }
+        // First convert YUYV to RGB
         let future = converter.yuyv_buffer_to_vulkan_image(
             frame,
             vulkano::sync::now(device.clone()),
             queue.clone(),
             &buffer,
+            textures[0].clone(),
         )?;
-        let (future, image) = correction.correct(future, queue.clone())?;
-        future.then_signal_fence().wait(None)?;
 
+        // Then do lens correction
+        let future = correction.correct(future, queue.clone(), textures[1].clone())?;
+
+        // Finally apply projection
+        let frame_time =
+            Into::<std::time::Duration>::into(metadata.timestamp) - first_frame_timestamp;
+        // Calculate each eye's Model View Project matrix at the moment the current frame is taken
+        let (l, r) = projection::Projection::calculate_mvp(
+            &overlay_model,
+            fov,
+            &vrsys,
+            frame_time,
+            first_frame_instant,
+        );
+        let future = projector.project(future, queue.clone(), output.clone(), 1.0, (&l, &r))?;
+
+        // Wait for work to complete
+        future.then_signal_fence().wait(None)?;
+        if capture {
+            log::info!("End Capture");
+            rd.end_frame_capture(std::ptr::null(), std::ptr::null());
+            capture = false;
+        }
+
+        // Submit the texture
         overlay.set_texture(
-            1920,
-            960,
-            image,
+            CAMERA_SIZE * 2,
+            CAMERA_SIZE,
+            output,
             device.clone(),
             queue.clone(),
             instance.clone(),
@@ -196,6 +267,9 @@ fn main() -> Result<()> {
                 .ShowOverlay(overlay.as_raw())
                 .into_result()?;
         }
+
+        let mut event = std::mem::MaybeUninit::<openvr_sys::VREvent_t>::uninit();
+        // Handle OpenVR events
         while unsafe {
             vrsys.pin_mut().PollNextEvent(
                 event.as_mut_ptr() as *mut _,
@@ -203,22 +277,29 @@ fn main() -> Result<()> {
             )
         } {
             let event = unsafe { event.assume_init_ref() };
-            println!("{:?}", unsafe {
+            log::debug!("{:?}", unsafe {
                 std::mem::transmute::<_, openvr_sys::EVREventType>(event.eventType)
             });
             if event.eventType == openvr_sys::EVREventType::VREvent_ButtonPress as u32 {
-                println!("{:?}", unsafe { event.data.controller.button });
+                log::debug!("{:?}", unsafe { event.data.controller.button });
                 if unsafe { event.data.controller.button == 33 } {
-                    break 'main_loop;
+                    capture = true;
                 }
             } else if event.eventType == openvr_sys::EVREventType::VREvent_Quit as u32 {
                 vrsys.pin_mut().AcknowledgeQuit_Exiting();
                 break 'main_loop;
+            } else if event.eventType == openvr_sys::EVREventType::VREvent_IpdChanged as u32 {
+                log::info!("ipd: {}", unsafe { event.data.ipd.ipdMeters });
             }
         }
+
+        // Handle Ctrl-C
         if !running.load(std::sync::atomic::Ordering::Relaxed) {
             break;
         }
+
+        // Fetch next frame
+        (frame, metadata) = v4l::io::traits::CaptureStream::next(&mut video_stream)?;
     }
 
     Ok(())

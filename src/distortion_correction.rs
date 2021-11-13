@@ -28,7 +28,6 @@ pub struct StereoCorrection {
     render_pass: Arc<RenderPass>,
     pipeline: Arc<GraphicsPipeline>,
     desc_set: Arc<PersistentDescriptorSet>,
-    size: u32,
 }
 
 impl StereoCorrection {
@@ -62,6 +61,7 @@ impl StereoCorrection {
         return 1.0;
     }
     /// Input size is (size * 2, size)
+    /// returns also the adjusted FOV
     pub fn new(
         device: Arc<Device>,
         input: Arc<AttachmentImage>,
@@ -69,7 +69,7 @@ impl StereoCorrection {
         cleft: [f32; 2],
         cright: [f32; 2],
         focal: f32,
-    ) -> Result<Self> {
+    ) -> Result<(Self, f32)> {
         if input.dimensions()[0] != input.dimensions()[1] * 2 {
             return Err(anyhow!("Input not square"));
         }
@@ -139,16 +139,8 @@ impl StereoCorrection {
         let uniform = CpuAccessibleBuffer::from_data(
             device.clone(),
             BufferUsage {
-                transfer_source: false,
-                transfer_destination: false,
-                uniform_texel_buffer: false,
-                storage_texel_buffer: false,
                 uniform_buffer: true,
-                storage_buffer: false,
-                index_buffer: false,
-                vertex_buffer: false,
-                indirect_buffer: false,
-                device_address: false,
+                ..BufferUsage::none()
             },
             false,
             uniform,
@@ -171,19 +163,19 @@ impl StereoCorrection {
             .add_buffer(uniform)?
             .add_sampled_image(ImageView::new(input.clone())?, sampler)?;
         let desc_set = Arc::new(desc_set_builder.build()?);
-        Ok(Self {
+        Ok((Self {
             device,
             render_pass,
             pipeline,
             desc_set,
-            size,
-        })
+        }, focal * min_off_center * 2.0 / size as f32))
     }
     pub fn correct(
         &self,
         after: impl GpuFuture,
         queue: Arc<Queue>,
-    ) -> Result<(impl GpuFuture, Arc<AttachmentImage>)> {
+        output: Arc<AttachmentImage>
+    ) -> Result<impl GpuFuture> {
         use vulkano::device::DeviceOwned;
         if queue.device() != &self.device {
             return Err(anyhow!("Device mismatch"));
@@ -219,21 +211,6 @@ impl StereoCorrection {
             .cloned(),
         )
         .unwrap();
-        let output = vulkano::image::AttachmentImage::with_usage(
-            self.device.clone(),
-            [self.size * 2, self.size],
-            vulkano::format::Format::R8G8B8A8_UNORM,
-            vulkano::image::ImageUsage {
-                transfer_source: true,
-                transfer_destination: false,
-                sampled: true,
-                storage: false,
-                color_attachment: true,
-                depth_stencil_attachment: false,
-                transient_attachment: false,
-                input_attachment: false,
-            },
-        )?;
         let framebuffer = Arc::new(
             Framebuffer::start(self.render_pass.clone())
                 .add(ImageView::new(output.clone())?)?
@@ -255,7 +232,7 @@ impl StereoCorrection {
             .bind_vertex_buffers(0, vertex_buffer.clone())
             .draw(vertex_buffer.len() as u32, 1, 0, 0)?
             .end_render_pass()?;
-        Ok((after.then_execute(queue, cmdbuf.build()?)?, output))
+        Ok(after.then_execute(queue, cmdbuf.build()?)?)
     }
 }
 

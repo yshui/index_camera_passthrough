@@ -62,7 +62,6 @@ pub struct GpuYuyvConverter {
     render_pass: Arc<RenderPass>,
     pipeline: Arc<GraphicsPipeline>,
     src: Arc<AttachmentImage>,
-    output: Arc<AttachmentImage>,
     desc_set: Arc<PersistentDescriptorSet>,
 }
 
@@ -70,7 +69,7 @@ pub struct GpuYuyvConverter {
 /// know if it's widely supported. And the image format we need (G8B8G8R8_422_UNORM)
 /// seems to have even less support than the extension itself.
 impl GpuYuyvConverter {
-    pub fn new(device: Arc<Device>, output: Arc<AttachmentImage>, w: u32, h: u32) -> Result<Self> {
+    pub fn new(device: Arc<Device>, w: u32, h: u32) -> Result<Self> {
         if w % 2 != 0 {
             return Err(anyhow!("Width can't be odd"));
         }
@@ -142,7 +141,6 @@ impl GpuYuyvConverter {
         let desc_set = Arc::new(desc_set_builder.build()?);
         Ok(Self {
             src,
-            output,
             render_pass,
             pipeline,
             device,
@@ -161,6 +159,7 @@ impl GpuYuyvConverter {
         after: impl GpuFuture,
         queue: Arc<Queue>,
         buffer: &CpuBufferPool<u8>,
+        output: Arc<AttachmentImage>,
     ) -> Result<impl GpuFuture> {
         use vulkano::device::DeviceOwned;
         if queue.device() != &self.device || buffer.device() != &self.device {
@@ -203,7 +202,7 @@ impl GpuYuyvConverter {
         .unwrap();
         let framebuffer = Arc::new(
             Framebuffer::start(self.render_pass.clone())
-                .add(ImageView::new(self.output.clone())?)?
+                .add(ImageView::new(output.clone())?)?
                 .build()?,
         );
         cmdbuf

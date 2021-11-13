@@ -19,6 +19,8 @@ udev = "0.6.2"
 vulkano-shaders = "0.26.0"
 thiserror = "1.0.30"
 renderdoc = "0.10.1"
+nalgebra = "0.29.0"
+itertools = "0.10.1"
 
 [features]
 

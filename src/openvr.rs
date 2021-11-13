@@ -77,6 +77,15 @@ impl VRSystem {
     fn hold_vulkan_device(&self, device: Arc<Device>) {
         self.1.replace(Some(device));
     }
+    #[allow(dead_code)]
+    pub fn find_hmd(&self) -> Option<u32> {
+        for i in 0..64 {
+            if self.pin_mut().GetTrackedDeviceClass(i) == openvr_sys::ETrackedDeviceClass::TrackedDeviceClass_HMD {
+                return Some(i);
+            }
+        }
+        None
+    }
     pub fn pin_mut(&self) -> Pin<&mut openvr_sys::IVRSystem> {
         unsafe { Pin::new_unchecked(&mut *self.0) }
     }

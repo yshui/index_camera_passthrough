@@ -34,6 +34,7 @@ autocxx::include_cpp! {
     generate_pod!("vr::VREvent_ShowDevTools_t")
     generate_pod!("vr::VREvent_HDCPError_t")
     generate_pod!("vr::TrackedDeviceIndex_t")
+    generate_pod!("vr::TrackedDevicePose_t")
     generate_pod!("vr::VRTextureBounds_t")
     generate_pod!("vr::VRVulkanTextureData_t")
     generate_pod!("vr::Texture_t")
@@ -90,6 +91,7 @@ pub struct VREvent_t {
 }
 
 pub use ffi::vr::*;
+pub use ffi::*;
 
 impl EVROverlayError {
     pub fn into_result(self) -> Result<(), Self> {
@@ -129,4 +131,27 @@ impl std::fmt::Display for EVRInitError {
 
 impl std::error::Error for EVRInitError {
 
+}
+
+impl Into<nalgebra::Matrix3x4<f32>> for HmdMatrix34_t {
+    fn into(self) -> nalgebra::Matrix3x4<f32> {
+        use nalgebra::matrix;
+        matrix![
+            self.m[0][0], self.m[0][1], self.m[0][2], self.m[0][3];
+            self.m[1][0], self.m[1][1], self.m[1][2], self.m[1][3];
+            self.m[2][0], self.m[2][1], self.m[2][2], self.m[2][3];
+        ]
+    }
+}
+
+impl Into<nalgebra::Matrix4<f32>> for HmdMatrix34_t {
+    fn into(self) -> nalgebra::Matrix4<f32> {
+        use nalgebra::matrix;
+        matrix![
+            self.m[0][0], self.m[0][1], self.m[0][2], self.m[0][3];
+            self.m[1][0], self.m[1][1], self.m[1][2], self.m[1][3];
+            self.m[2][0], self.m[2][1], self.m[2][2], self.m[2][3];
+                     0.0,          0.0,          0.0,          1.0;
+        ]
+    }
 }
