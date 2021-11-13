@@ -38,11 +38,27 @@ mod fs {
     }
 }
 
+/// Because your eye and the camera is at different physical locations, it is impossible
+/// to project camera view into VR space perfectly. There are trade offs approximating
+/// this projection.
+///
+/// In FromCamera mode, we assume your eyes are at the cameras' physical location. This mode
+/// has larger viewing range, but everything will _seem_ smaller to you.
+///
+/// In FromEye mode, we assume your cameras are at your eyes' physical location. Everything will
+/// have right scale in this mode, but the viewing range is smaller.
+#[derive(Eq, PartialEq, Debug)]
+pub enum ProjectionMode {
+    FromCamera,
+    FromEye,
+}
+
 pub struct Projection {
     device: Arc<Device>,
     source: Arc<AttachmentImage>,
     pipeline: Arc<GraphicsPipeline>,
     render_pass: Arc<RenderPass>,
+    mode: ProjectionMode,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -80,6 +96,7 @@ impl Projection {
     /// frame_time = how long after the first frame is the current frame taken
     /// time_origin = instant when the first frame is taken
     pub fn calculate_mvp(
+        &self,
         overlay_transform: &Matrix4<f32>,
         camera_fov: f32,
         ivrsystem: &crate::openvr::VRSystem,
@@ -100,6 +117,15 @@ impl Projection {
             hmd_transform.assume_init()
         };
         let transform: Matrix4<_> = hmd_transform.mDeviceToAbsoluteTracking.into();
+        let left_eye: Matrix4<_> = ivrsystem
+            .pin_mut()
+            .GetEyeToHeadTransform(openvr_sys::EVREye::Eye_Left)
+            .into();
+        let right_eye: Matrix4<_> = ivrsystem
+            .pin_mut()
+            .GetEyeToHeadTransform(openvr_sys::EVREye::Eye_Right)
+            .into();
+
         // Camera space to HMD space transform, based on physical measurements
         let left_cam: Matrix4<_> = matrix![
             1.0, 0.0, 0.0, -0.067;
@@ -114,8 +140,10 @@ impl Projection {
             0.0, 0.0, 0.0, 1.0;
         ];
 
-        let left_eye = transform * left_cam;
-        let right_eye = transform * right_cam;
+        let (left_eye, right_eye) = match self.mode {
+            ProjectionMode::FromEye => (transform * left_eye, transform * right_eye),
+            ProjectionMode::FromCamera => (transform * left_cam, transform * right_cam),
+        };
         let left_view = left_eye
             .try_inverse()
             .expect("HMD transform not invertable?");
@@ -140,7 +168,7 @@ impl Projection {
             camera_projection * right_view * overlay_transform,
         )
     }
-    pub fn new(device: Arc<Device>, source: Arc<AttachmentImage>) -> Result<Self> {
+    pub fn new(device: Arc<Device>, source: Arc<AttachmentImage>, mode: ProjectionMode) -> Result<Self> {
         let [w, h, _] = source.dimensions();
         if w != h * 2 {
             return Err(anyhow!("Input not square"));
@@ -179,6 +207,7 @@ impl Projection {
             render_pass,
             pipeline,
             source,
+            mode
         })
     }
     pub fn project(
@@ -187,6 +216,7 @@ impl Projection {
         queue: Arc<Queue>,
         output: Arc<AttachmentImage>,
         overlay_width: f32,
+        ipd: f32,
         (left, right): (&Matrix4<f32>, &Matrix4<f32>),
     ) -> Result<impl GpuFuture> {
         let framebuffer = Arc::new(
@@ -259,12 +289,14 @@ impl Projection {
         )
         .unwrap();
 
+        let eye_offset = if self.mode == ProjectionMode::FromEye { 0.067 - ipd / 2.0 } else { 0.0 };
         // Left
         let uniform = fs::ty::Info {
             mvp: left.as_ref().clone(),
             texOffset: [0.0, 0.0],
             overlayWidth: overlay_width,
             windowSize: [(w / 2) as f32, h as f32],
+            eyeOffset: eye_offset,
         };
         let uniform = CpuAccessibleBuffer::from_data(
             self.device.clone(),
@@ -312,6 +344,7 @@ impl Projection {
             texOffset: [0.5, 0.0],
             overlayWidth: overlay_width,
             windowSize: [(w / 2) as f32, h as f32],
+            eyeOffset: eye_offset,
         };
         let uniform = CpuAccessibleBuffer::from_data(
             self.device.clone(),

@@ -188,7 +188,11 @@ fn main() -> Result<()> {
         [489.2, 473.7],
         FOV,
     )?;
-    let projector = projection::Projection::new(device.clone(), textures[1].clone())?;
+    let projector = projection::Projection::new(
+        device.clone(),
+        textures[1].clone(),
+        projection::ProjectionMode::FromCamera,
+    )?;
     log::info!("Adjusted FOV: {}", fov);
 
     // Fetch the first camera frame
@@ -196,6 +200,18 @@ fn main() -> Result<()> {
     let first_frame_instant = std::time::Instant::now();
     let first_frame_timestamp: std::time::Duration = metadata.timestamp.into();
     let mut capture = false;
+    let mut error = std::mem::MaybeUninit::<_>::uninit();
+    let mut ipd = unsafe {
+        vrsys.pin_mut().GetFloatTrackedDeviceProperty(
+            0,
+            openvr_sys::ETrackedDeviceProperty::Prop_UserIpdMeters_Float,
+            error.as_mut_ptr(),
+        )
+    };
+    if unsafe { error.assume_init() } != openvr_sys::ETrackedPropertyError::TrackedProp_Success {
+        return Err(anyhow!("Cannot get device IPD {:?}", error));
+    }
+    log::info!("IPD: {}", ipd);
     'main_loop: loop {
         // Allocate final image
         let output = vulkano::image::AttachmentImage::with_usage(
@@ -234,14 +250,10 @@ fn main() -> Result<()> {
         let frame_time =
             Into::<std::time::Duration>::into(metadata.timestamp) - first_frame_timestamp;
         // Calculate each eye's Model View Project matrix at the moment the current frame is taken
-        let (l, r) = projection::Projection::calculate_mvp(
-            &overlay_model,
-            fov,
-            &vrsys,
-            frame_time,
-            first_frame_instant,
-        );
-        let future = projector.project(future, queue.clone(), output.clone(), 1.0, (&l, &r))?;
+        let (l, r) =
+            projector.calculate_mvp(&overlay_model, fov, &vrsys, frame_time, first_frame_instant);
+        let future =
+            projector.project(future, queue.clone(), output.clone(), 1.0, ipd, (&l, &r))?;
 
         // Wait for work to complete
         future.then_signal_fence().wait(None)?;
@@ -289,7 +301,8 @@ fn main() -> Result<()> {
                 vrsys.pin_mut().AcknowledgeQuit_Exiting();
                 break 'main_loop;
             } else if event.eventType == openvr_sys::EVREventType::VREvent_IpdChanged as u32 {
-                log::info!("ipd: {}", unsafe { event.data.ipd.ipdMeters });
+                ipd = unsafe { event.data.ipd.ipdMeters };
+                log::info!("ipd: {}", ipd);
             }
         }
 
