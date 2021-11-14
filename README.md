@@ -7,14 +7,13 @@ The problem that the Index camera doesn't work on Linux has been there for a lon
 
 ## Current status
 
-For now this application should create an overlay in your game world and show you what your camera sees. This is not proper passthrough yet, i.e. the overlay doesn't move with you, etc.
+For now this application should create an overlay in your game world that acts as a portal to real world. This is not proper passthrough yet, i.e. the overlay doesn't move with you, etc.
 
 Also the lens distortion parameters of the camera is hard coded. Ideally every Index camera has the same characteristics, but that's likely not the case.
 
 ## TODO
 
 * Make the overlay positioning configurable. e.g. follow controller, distance from your face, etc.
-* Implement reprojection. The camera frame rate doesn't match the HMD refresh rate, so we need reprojection to not induce motion sickness.
 * Write instructions on how to calibrate your Index camera.
 * (Unrealistic) implement Valve's "3D" passthrough. To do this we essentially need to do 3D reconstruction from the stereo camera. There are existing methods, but will be really challenging to implement.
 
