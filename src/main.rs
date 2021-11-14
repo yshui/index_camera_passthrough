@@ -3,6 +3,7 @@ mod config;
 mod distortion_correction;
 mod openvr;
 mod projection;
+mod steam;
 mod yuv;
 
 use anyhow::{anyhow, Context, Result};
@@ -137,6 +138,28 @@ fn main() -> Result<()> {
     let queue = queues.next().unwrap();
     let buffer = CpuBufferPool::upload(device.clone());
 
+    // Load steam calibration data
+    let hmd_id = vrsys.find_hmd().with_context(|| anyhow!("HMD not found"))?;
+    let mut serial_number = [0u8; 32];
+    let mut error = openvr_sys::ETrackedPropertyError::TrackedProp_Success;
+    let serial_number_len = unsafe {
+        vrsys.pin_mut().GetStringTrackedDeviceProperty(
+            hmd_id,
+            openvr_sys::ETrackedDeviceProperty::Prop_SerialNumber_String,
+            serial_number.as_mut_ptr() as *mut _,
+            32,
+            &mut error,
+        )
+    };
+    if error != openvr_sys::ETrackedPropertyError::TrackedProp_Success {
+        return Err(anyhow!("Cannot get HMD's serial number"))
+    }
+    let lhcfg = steam::load_steam_config(std::str::from_utf8(&serial_number[..serial_number_len as usize-1])?).unwrap_or_else(|e| {
+        log::warn!("Cannot find camera calibration data, using default ones {}", e.to_string());
+        steam::default_lighthouse_config()
+    });
+    log::info!("{}", serde_json::to_string(&lhcfg)?);
+    return Ok(());
     // Create a VROverlay
     let vroverlay = vrsys.overlay();
     let mut overlay = vroverlay.create_overlay(APP_KEY, APP_NAME)?;
