@@ -44,9 +44,7 @@ fn find_index_camera() -> Result<std::path::PathBuf> {
 }
 
 fn main() -> Result<()> {
-    use schemars::schema_for;
     let mut rd = renderdoc::RenderDoc::<renderdoc::V100>::new()?;
-    println!("{}", serde_json::to_string_pretty(&schema_for!(config::Config))?);
     env_logger::init();
     let camera = v4l::Device::with_path(find_index_camera()?)?;
     if !camera

@@ -1,11 +1,10 @@
 use serde::{Serialize, Deserialize};
-use schemars::JsonSchema;
 
 /// Because your eye and the camera is at different physical locations, it is impossible
 /// to project camera view into VR space perfectly. There are trade offs approximating
 /// this projection. (viewing range means you must be within this distance from the real world
 /// objects you are looking at).
-#[derive(Eq, PartialEq, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Eq, PartialEq, Debug, Serialize, Deserialize)]
 pub enum ProjectionMode {
     /// in this mode, we assume your eyes are at the cameras' physical location. this mode
     /// has larger viewing range (~2m), but everything will _seem_ smaller to you.
@@ -21,7 +20,7 @@ impl Default for ProjectionMode {
     }
 }
 pub const fn default_overlay_distance() -> f32 { 1.0 }
-#[derive(PartialEq, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(PartialEq, Debug, Serialize, Deserialize)]
 #[serde(tag = "mode")]
 pub enum PositionMode {
     /// the overlay is shown right in front of your HMD
@@ -43,7 +42,7 @@ impl Default for PositionMode {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum Eye {
     Left, 
     Right,
@@ -51,7 +50,7 @@ pub enum Eye {
 
 pub const fn default_display_eye() -> Eye { Eye::Left }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "mode")]
 pub enum DisplayMode {
     /// display a stereo image on the overlay. conceptually the overlay becomes a portal from VR
@@ -76,7 +75,7 @@ impl Default for DisplayMode {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema, Default)]
+#[derive(Debug, Serialize, Deserialize, Default)]
 pub struct OverlayConfig {
     /// how is the overlay positioned
     #[serde(default)]
@@ -85,7 +84,7 @@ pub struct OverlayConfig {
 }
 
 /// Index camera passthrough
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, Default)]
 pub struct Config {
     /// camera device to use. auto detect if not set
     #[serde(default)]
@@ -98,3 +97,13 @@ pub struct Config {
     display_mode: DisplayMode,
 }
 
+use anyhow::Result;
+pub fn load_config() -> Result<Config> {
+    let xdgdir = xdg::BaseDirectories::new()?;
+    if let Some(f) = xdgdir.find_config_file("index_camera_passthrough.toml") {
+        let cfg = std::fs::read_to_string(f)?;
+        Ok(toml::from_str(&cfg)?)
+    } else {
+        Ok(Default::default())
+    }
+}

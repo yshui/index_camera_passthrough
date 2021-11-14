@@ -17,6 +17,12 @@ Also the lens distortion parameters of the camera is hard coded. Ideally every I
 * Write instructions on how to calibrate your Index camera.
 * (Unrealistic) implement Valve's "3D" passthrough. To do this we essentially need to do 3D reconstruction from the stereo camera. There are existing methods, but will be really challenging to implement.
 
+## Contribute
+
+If you have any suggestions about features, or how to make the passthrough look better, please let me know. I am not a graphics programmer and am trying my best to get things work, but solutions I came up with is definitely not going to be as good as things can be.
+
+_Please_ help me out.
+
 ## Build instruction
 
 To build this program, you need:

@@ -8,7 +8,9 @@ layout(location = 1) in noperspective vec3 texCoord;
 layout(location = 0) out vec4 color;
 
 void main() {
-	// Normalize Frag Coord
+	// Perspective divide here, if we do this in vertex
+	// shader the texCoord won't be interpolated correctly
+	// because of perspective.
 	vec2 tex_coord = texCoord.xy / texCoord.z;
 	tex_coord = tex_coord + vec2(0.25, 0.5);
 
