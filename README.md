@@ -7,18 +7,22 @@ The problem that the Index camera doesn't work on Linux has been there for a lon
 
 ## Current status
 
-For now this application should create an overlay in your game world that acts as a portal to real world. This is not proper passthrough yet, i.e. the overlay doesn't move with you, etc.
+For now this application can create an overlay in your game world that acts as a portal to real world. You can configure the overlay to be in one place, or stay in front of you.
 
-Also the lens distortion parameters of the camera is hard coded. Ideally every Index camera has the same characteristics, but that's likely not the case.
+Also the lens distortion parameters of the camera is hard coded. Valve seem to store their calibration data in the steam folder, we should read them.
 
 ## TODO
 
-* Make the overlay positioning configurable. e.g. follow controller, distance from your face, etc.
+* Add option to make overlay follow controller.
+* Open/close overlay
+* Document configuration options
 * ~Write instructions on how to calibrate your Index camera.~
 * Read camera calibration data from Steam lighthouse calibration data.
 * (Unrealistic) implement Valve's "3D" passthrough. To do this we essentially need to do 3D reconstruction from the stereo camera. There are existing methods, but will be really challenging to implement.
 
 ## Contribute
+
+You can test this out and report your experience to help this improve.
 
 If you have any suggestions about features, or how to make the passthrough look better, please let me know. I am not a graphics programmer and am trying my best to get things work, but solutions I came up with is definitely not going to be as good as things can be.
 
