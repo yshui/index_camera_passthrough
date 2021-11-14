@@ -168,7 +168,7 @@ impl StereoCorrection {
             render_pass,
             pipeline,
             desc_set,
-        }, focal * min_off_center * 2.0 / size as f32))
+        }, focal / (min_off_center * 2.0 / size as f32)))
     }
     pub fn correct(
         &self,
