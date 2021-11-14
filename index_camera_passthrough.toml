@@ -1,0 +1,44 @@
+## This is the configuration file for index_camera_passthrough.
+## This file should live at ~/.config/index_camera_passthrough.toml
+
+## camera device to use. auto detect if not set
+camera_device = ""
+
+[overlay.position]
+## how will the overlay be positioned.
+## possible values:
+##   - "Hmd":      stay in front of your Hmd
+##   - "Absolute": fixed place in VR space
+mode = "Hmd"
+
+## how far away should the overlay be placed
+## only meaningful if mode is "Hmd"
+distance = 1.0
+
+## transformation matrix
+## only meaningful if mode is "Absolute"
+# transform = [ [1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1] ]
+
+[display_mode]
+## the display mode.
+## possible values:
+##   - "Stereo": show a 3D image, how much you can see is limited by how
+##               big the overlay is in your field of view.
+##   - "Flat":   show a flat image
+mode = "Flat"
+
+## which camera's image to display in Flat mode
+## only meaningful if mode is "Flat"
+eye = "Left"
+
+## Because your eye and the camera is at different physical locations, it is impossible
+## to project camera view into VR space perfectly. There are trade offs approximating
+## this projection. (viewing range means things too close to you will give you double vision).
+## possible values:
+##   - "FromCamera": in this mode, we assume your eyes are at the cameras' physical location. this mode 
+##                   has larger viewing range, but everything will smaller to you.
+##   - "FromEye":    in this mode, we assume your cameras are at your eyes' physical location. everything will
+##                   have the right scale in this mode, but the viewing range is smaller.
+## only meaningful if mode is "Stereo"
+# projection_mode = "FromCamera"
+

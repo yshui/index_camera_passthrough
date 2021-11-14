@@ -7,7 +7,7 @@ The problem that the Index camera doesn't work on Linux has been there for a lon
 
 ## Current status
 
-For now this application can create an overlay in your game world that acts as a portal to real world. You can configure the overlay to be in one place, or stay in front of you.
+For now this application can create an overlay in your game world that acts as a portal to real world. You can configure the overlay to be in one place, or stay in front of you. This behavior is disabled by default, see [the example config file](index_camera_passthrough.toml) for how to enable and more options.
 
 Also the lens distortion parameters of the camera is hard coded. Valve seem to store their calibration data in the steam folder, we should read them.
 
