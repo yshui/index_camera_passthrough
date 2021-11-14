@@ -85,23 +85,8 @@ impl Projection {
         overlay_transform: &Matrix4<f32>,
         camera_fov: f32,
         ivrsystem: &crate::openvr::VRSystem,
-        frame_time: std::time::Duration,
-        time_origin: std::time::Instant,
+        hmd_transform: &Matrix4<f32>,
     ) -> (Matrix4<f32>, Matrix4<f32>) {
-        let mut hmd_transform = std::mem::MaybeUninit::<openvr_sys::TrackedDevicePose_t>::uninit();
-        // We try to get the pose at the time when the camera frame is captured. GetDeviceToAbsoluteTrackingPose
-        // doesn't specifically say if a negative time offset will work...
-        let elapsed = std::time::Instant::now() - time_origin - frame_time;
-        let hmd_transform = unsafe {
-            ivrsystem.pin_mut().GetDeviceToAbsoluteTrackingPose(
-                openvr_sys::ETrackingUniverseOrigin::TrackingUniverseStanding,
-                -elapsed.as_secs_f32(),
-                hmd_transform.as_mut_ptr(),
-                1,
-            );
-            hmd_transform.assume_init()
-        };
-        let transform: Matrix4<_> = hmd_transform.mDeviceToAbsoluteTracking.into();
         let left_eye: Matrix4<_> = ivrsystem
             .pin_mut()
             .GetEyeToHeadTransform(openvr_sys::EVREye::Eye_Left)
@@ -126,8 +111,8 @@ impl Projection {
         ];
 
         let (left_eye, right_eye) = match self.mode {
-            ProjectionMode::FromEye => (transform * left_eye, transform * right_eye),
-            ProjectionMode::FromCamera => (transform * left_cam, transform * right_cam),
+            ProjectionMode::FromEye => (hmd_transform * left_eye, hmd_transform * right_eye),
+            ProjectionMode::FromCamera => (hmd_transform * left_cam, hmd_transform * right_cam),
         };
         let left_view = left_eye
             .try_inverse()

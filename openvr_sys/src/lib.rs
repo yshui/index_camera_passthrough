@@ -155,3 +155,15 @@ impl Into<nalgebra::Matrix4<f32>> for HmdMatrix34_t {
         ]
     }
 }
+
+impl From<&'_ nalgebra::Matrix4<f32>> for HmdMatrix34_t {
+    fn from(m: &nalgebra::Matrix4<f32>) -> Self {
+        let mut ret = unsafe { std::mem::MaybeUninit::<Self>::uninit().assume_init() };
+        for i in 0..3 {
+            for j in 0..4 {
+                ret.m[i][j] = m[(i,j)];
+            }
+        }
+        ret
+    }
+}

@@ -1,12 +1,13 @@
 #![feature(untagged_unions, try_trait_v2, destructuring_assignment)]
+mod config;
 mod distortion_correction;
 mod openvr;
 mod projection;
 mod yuv;
-mod config;
 
 use anyhow::{anyhow, Context, Result};
 use ash::vk::Handle;
+use nalgebra::matrix;
 use openvr::*;
 use v4l::video::Capture;
 use vulkano::{
@@ -44,9 +45,18 @@ fn find_index_camera() -> Result<std::path::PathBuf> {
 }
 
 fn main() -> Result<()> {
-    let mut rd = renderdoc::RenderDoc::<renderdoc::V100>::new()?;
+    let cfg = config::load_config()?;
+    let mut rd = None;
+    if cfg.debug {
+        rd = Some(renderdoc::RenderDoc::<renderdoc::V100>::new()?);
+        std::env::set_var("RUST_LOG", "debug");
+    }
     env_logger::init();
-    let camera = v4l::Device::with_path(find_index_camera()?)?;
+    let camera = v4l::Device::with_path(if cfg.camera_device.is_empty() {
+        find_index_camera()?
+    } else {
+        std::path::Path::new(&cfg.camera_device).to_owned()
+    })?;
     if !camera
         .query_caps()?
         .capabilities
@@ -130,29 +140,39 @@ fn main() -> Result<()> {
     // Create a VROverlay
     let vroverlay = vrsys.overlay();
     let mut overlay = vroverlay.create_overlay(APP_KEY, APP_NAME)?;
-    vroverlay
-        .pin_mut()
-        .SetOverlayFlag(
-            overlay.as_raw(),
-            openvr_sys::VROverlayFlags::VROverlayFlags_SideBySide_Parallel,
-            true,
-        )
-        .into_result()?;
-    let transformation = openvr_sys::HmdMatrix34_t {
-        m: [
-            [1.0, 0.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0, 1.0],
-            [0.0, 0.0, 1.0, -1.0],
-        ],
+    if let config::DisplayMode::Stereo { .. } = cfg.display_mode {
+        vroverlay
+            .pin_mut()
+            .SetOverlayFlag(
+                overlay.as_raw(),
+                openvr_sys::VROverlayFlags::VROverlayFlags_SideBySide_Parallel,
+                true,
+            )
+            .into_result()?;
+    }
+
+    let mut overlay_transform = match cfg.overlay.position {
+        config::PositionMode::Absolute { transform } => {
+            let mut transformation = openvr_sys::HmdMatrix34_t { m: [[0.0; 4]; 3] };
+            transformation.m[..].copy_from_slice(&transform[..3]);
+            unsafe {
+                vroverlay.pin_mut().SetOverlayTransformAbsolute(
+                    overlay.as_raw(),
+                    openvr_sys::ETrackingUniverseOrigin::TrackingUniverseStanding,
+                    &transformation,
+                )
+            };
+            transform.into()
+        }
+        config::PositionMode::Hmd { distance } => {
+            matrix![
+                1.0, 0.0, 0.0, 0.0;
+                0.0, 1.0, 0.0, 0.0;
+                0.0, 0.0, 1.0, -distance;
+                0.0, 0.0, 0.0, 1.0;
+            ]
+        }
     };
-    unsafe {
-        vroverlay.pin_mut().SetOverlayTransformAbsolute(
-            overlay.as_raw(),
-            openvr_sys::ETrackingUniverseOrigin::TrackingUniverseStanding,
-            &transformation,
-        )
-    };
-    let overlay_model = transformation.into();
 
     // Allocate intermediate textures
     let textures: Result<Vec<_>> = (0..2)
@@ -189,17 +209,51 @@ fn main() -> Result<()> {
         [489.2, 473.7],
         FOV,
     )?;
-    let projector = projection::Projection::new(
-        device.clone(),
-        textures[1].clone(),
-        config::ProjectionMode::FromCamera,
-    )?;
+    let projector = match cfg.display_mode {
+        config::DisplayMode::Stereo { projection_mode } => Some(projection::Projection::new(
+            device.clone(),
+            textures[1].clone(),
+            projection_mode,
+        )?),
+        config::DisplayMode::Flat {
+            eye: config::Eye::Left,
+        } => {
+            let bound = openvr_sys::VRTextureBounds_t {
+                uMin: 0.0,
+                uMax: 0.5,
+                vMin: 0.0,
+                vMax: 1.0,
+            };
+            unsafe {
+                vroverlay
+                    .pin_mut()
+                    .SetOverlayTextureBounds(overlay.as_raw(), &bound)
+            };
+            None
+        }
+        config::DisplayMode::Flat {
+            eye: config::Eye::Right,
+        } => {
+            let bound = openvr_sys::VRTextureBounds_t {
+                uMin: 0.5,
+                uMax: 1.0,
+                vMin: 0.0,
+                vMax: 1.0,
+            };
+            unsafe {
+                vroverlay
+                    .pin_mut()
+                    .SetOverlayTextureBounds(overlay.as_raw(), &bound)
+            };
+            None
+        }
+    };
     log::info!("Adjusted FOV: {}", fov);
 
     // Fetch the first camera frame
     let (mut frame, mut metadata) = v4l::io::traits::CaptureStream::next(&mut video_stream)?;
-    let first_frame_instant = std::time::Instant::now();
     let first_frame_timestamp: std::time::Duration = metadata.timestamp.into();
+    let first_frame_instant = std::time::Instant::now();
     let mut capture = false;
     let mut error = std::mem::MaybeUninit::<_>::uninit();
     let mut ipd = unsafe {
@@ -214,6 +268,32 @@ fn main() -> Result<()> {
     }
     log::info!("IPD: {}", ipd);
     'main_loop: loop {
+        // We try to get the pose at the time when the camera frame is captured. GetDeviceToAbsoluteTrackingPose
+        // doesn't specifically say if a negative time offset will work...
+        // also, do this as early as possible.
+        let frame_time =
+            Into::<std::time::Duration>::into(metadata.timestamp) - first_frame_timestamp;
+        log::trace!(
+            "{:?} {:?}",
+            std::time::Instant::now() - first_frame_instant,
+            frame_time
+        );
+        let mut elapsed = std::time::Instant::now() - first_frame_instant;
+        if elapsed > frame_time {
+            elapsed = elapsed - frame_time;
+        } else {
+            elapsed = std::time::Duration::ZERO;
+        }
+        let mut hmd_transform = std::mem::MaybeUninit::<openvr_sys::TrackedDevicePose_t>::uninit();
+        let hmd_transform = unsafe {
+            vrsys.pin_mut().GetDeviceToAbsoluteTrackingPose(
+                openvr_sys::ETrackingUniverseOrigin::TrackingUniverseStanding,
+                -elapsed.as_secs_f32(),
+                hmd_transform.as_mut_ptr(),
+                1,
+            );
+            hmd_transform.assume_init().mDeviceToAbsoluteTracking.into()
+        };
         // Allocate final image
         let output = vulkano::image::AttachmentImage::with_usage(
             device.clone(),
@@ -232,8 +312,10 @@ fn main() -> Result<()> {
         )?;
 
         if capture {
-            log::info!("Start Capture");
-            rd.start_frame_capture(std::ptr::null(), std::ptr::null());
+            if let Some(rd) = rd.as_mut() {
+                log::info!("Start Capture");
+                rd.start_frame_capture(std::ptr::null(), std::ptr::null());
+            }
         }
         // First convert YUYV to RGB
         let future = converter.yuyv_buffer_to_vulkan_image(
@@ -244,23 +326,51 @@ fn main() -> Result<()> {
             textures[0].clone(),
         )?;
 
-        // Then do lens correction
-        let future = correction.correct(future, queue.clone(), textures[1].clone())?;
+        match cfg.overlay.position {
+            config::PositionMode::Absolute { .. } => (),
+            config::PositionMode::Hmd { distance } => {
+                // We only move the overlay when we get new camera frame
+                // this way the overlay should be reprojected correctly in-between
+                overlay_transform = hmd_transform
+                    * matrix![
+                        1.0, 0.0, 0.0, 0.0;
+                        0.0, 1.0, 0.0, 0.0;
+                        0.0, 0.0, 1.0, -distance;
+                        0.0, 0.0, 0.0, 1.0;
+                    ];
+                unsafe {
+                    vroverlay.pin_mut().SetOverlayTransformAbsolute(
+                        overlay.as_raw(),
+                        openvr_sys::ETrackingUniverseOrigin::TrackingUniverseStanding,
+                        &(&overlay_transform).into(),
+                    )
+                };
+            }
+        };
 
-        // Finally apply projection
-        let frame_time =
-            Into::<std::time::Duration>::into(metadata.timestamp) - first_frame_timestamp;
-        // Calculate each eye's Model View Project matrix at the moment the current frame is taken
-        let (l, r) =
-            projector.calculate_mvp(&overlay_model, fov, &vrsys, frame_time, first_frame_instant);
-        let future =
-            projector.project(future, queue.clone(), output.clone(), 1.0, ipd, (&l, &r))?;
+        // TODO combine correction and projection
+        if let Some(projector) = projector.as_ref() {
+            // Then do lens correction
+            let future = correction.correct(future, queue.clone(), textures[1].clone())?;
+            // Finally apply projection
+            // Calculate each eye's Model View Project matrix at the moment the current frame is taken
+            let (l, r) = projector.calculate_mvp(&overlay_transform, fov, &vrsys, &hmd_transform);
+            let future =
+                projector.project(future, queue.clone(), output.clone(), 1.0, ipd, (&l, &r))?;
 
-        // Wait for work to complete
-        future.then_signal_fence().wait(None)?;
+            // Wait for work to complete
+            future.then_signal_fence().wait(None)?;
+        } else {
+            // Lens correction
+            let future = correction.correct(future, queue.clone(), output.clone())?;
+            future.then_signal_fence().wait(None)?;
+        }
+
         if capture {
-            log::info!("End Capture");
-            rd.end_frame_capture(std::ptr::null(), std::ptr::null());
+            if let Some(rd) = rd.as_mut() {
+                log::info!("End Capture");
+                rd.end_frame_capture(std::ptr::null(), std::ptr::null());
+            }
             capture = false;
         }
 

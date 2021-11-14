@@ -79,7 +79,7 @@ impl Default for DisplayMode {
 pub struct OverlayConfig {
     /// how is the overlay positioned
     #[serde(default)]
-    position: PositionMode,
+    pub position: PositionMode,
 
 }
 
@@ -88,13 +88,17 @@ pub struct OverlayConfig {
 pub struct Config {
     /// camera device to use. auto detect if not set
     #[serde(default)]
-    camera_device: String,
+    pub camera_device: String,
     /// overlay related configuration
     #[serde(default)]
-    overlay: OverlayConfig,
+    pub overlay: OverlayConfig,
     /// how is the camera view displayed on the overlay
     #[serde(default)]
-    display_mode: DisplayMode,
+    pub display_mode: DisplayMode,
+    /// enable debug option, including:
+    ///   - use trigger button to do renderdoc capture
+    #[serde(default)]
+    pub debug: bool,
 }
 
 use anyhow::Result;
