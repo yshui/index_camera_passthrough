@@ -2,15 +2,14 @@ use serde::{Serialize, Deserialize};
 
 /// Because your eye and the camera is at different physical locations, it is impossible
 /// to project camera view into VR space perfectly. There are trade offs approximating
-/// this projection. (viewing range means you must be within this distance from the real world
-/// objects you are looking at).
+/// this projection. (viewing range means things too close to you will give you double vision).
 #[derive(Eq, PartialEq, Debug, Serialize, Deserialize)]
 pub enum ProjectionMode {
     /// in this mode, we assume your eyes are at the cameras' physical location. this mode
-    /// has larger viewing range (~2m), but everything will _seem_ smaller to you.
+    /// has larger viewing range, but everything will smaller to you.
     FromCamera,
     /// in this mode, we assume your cameras are at your eyes' physical location. everything will
-    /// have the right scale in this mode, but the viewing range (~1m) is smaller.
+    /// have the right scale in this mode, but the viewing range is smaller.
     FromEye,
 }
 
