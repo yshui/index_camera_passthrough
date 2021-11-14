@@ -14,7 +14,8 @@ Also the lens distortion parameters of the camera is hard coded. Ideally every I
 ## TODO
 
 * Make the overlay positioning configurable. e.g. follow controller, distance from your face, etc.
-* Write instructions on how to calibrate your Index camera.
+* ~Write instructions on how to calibrate your Index camera.~
+* Read camera calibration data from Steam lighthouse calibration data.
 * (Unrealistic) implement Valve's "3D" passthrough. To do this we essentially need to do 3D reconstruction from the stereo camera. There are existing methods, but will be really challenging to implement.
 
 ## Contribute
