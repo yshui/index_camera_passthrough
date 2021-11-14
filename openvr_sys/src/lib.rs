@@ -133,35 +133,29 @@ impl std::error::Error for EVRInitError {
 
 }
 
-impl Into<nalgebra::Matrix3x4<f32>> for HmdMatrix34_t {
-    fn into(self) -> nalgebra::Matrix3x4<f32> {
-        use nalgebra::matrix;
-        matrix![
-            self.m[0][0], self.m[0][1], self.m[0][2], self.m[0][3];
-            self.m[1][0], self.m[1][1], self.m[1][2], self.m[1][3];
-            self.m[2][0], self.m[2][1], self.m[2][2], self.m[2][3];
-        ]
+impl<T: num::NumCast + num::Float + num::Zero + num::One + nalgebra::Scalar> Into<nalgebra::Matrix4<T>> for HmdMatrix34_t {
+    fn into(self) -> nalgebra::Matrix4<T> {
+        // Note: [[float; 4]; 4] -> Matrix is column major
+        let mut tmp = [[T::nan(); 4]; 4];
+        for i in 0..3 {
+            for j in 0..4 {
+                tmp[j][i] = T::from(self.m[i][j]).unwrap();
+            }
+        }
+        for i in 0..3 {
+            tmp[i][3] = T::zero();
+        }
+        tmp[3][3] = T::one();
+        tmp.into()
     }
 }
 
-impl Into<nalgebra::Matrix4<f32>> for HmdMatrix34_t {
-    fn into(self) -> nalgebra::Matrix4<f32> {
-        use nalgebra::matrix;
-        matrix![
-            self.m[0][0], self.m[0][1], self.m[0][2], self.m[0][3];
-            self.m[1][0], self.m[1][1], self.m[1][2], self.m[1][3];
-            self.m[2][0], self.m[2][1], self.m[2][2], self.m[2][3];
-                     0.0,          0.0,          0.0,          1.0;
-        ]
-    }
-}
-
-impl From<&'_ nalgebra::Matrix4<f32>> for HmdMatrix34_t {
-    fn from(m: &nalgebra::Matrix4<f32>) -> Self {
+impl<T: num::ToPrimitive> From<&'_ nalgebra::Matrix4<T>> for HmdMatrix34_t {
+    fn from(m: &nalgebra::Matrix4<T>) -> Self {
         let mut ret = unsafe { std::mem::MaybeUninit::<Self>::uninit().assume_init() };
         for i in 0..3 {
             for j in 0..4 {
-                ret.m[i][j] = m[(i,j)];
+                ret.m[i][j] = m[(i,j)].to_f32().unwrap();
             }
         }
         ret

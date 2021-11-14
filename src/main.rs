@@ -8,7 +8,7 @@ mod yuv;
 
 use anyhow::{anyhow, Context, Result};
 use ash::vk::Handle;
-use nalgebra::matrix;
+use nalgebra::{Matrix4, matrix};
 use openvr::*;
 use v4l::video::Capture;
 use vulkano::{
@@ -159,7 +159,7 @@ fn main() -> Result<()> {
         steam::default_lighthouse_config()
     });
     log::info!("{}", serde_json::to_string(&lhcfg)?);
-    return Ok(());
+
     // Create a VROverlay
     let vroverlay = vrsys.overlay();
     let mut overlay = vroverlay.create_overlay(APP_KEY, APP_NAME)?;
@@ -174,7 +174,7 @@ fn main() -> Result<()> {
             .into_result()?;
     }
 
-    let mut overlay_transform = match cfg.overlay.position {
+    let mut overlay_transform: Matrix4<f64> = match cfg.overlay.position {
         config::PositionMode::Absolute { transform } => {
             let mut transformation = openvr_sys::HmdMatrix34_t { m: [[0.0; 4]; 3] };
             transformation.m[..].copy_from_slice(&transform[..3]);
@@ -185,13 +185,14 @@ fn main() -> Result<()> {
                     &transformation,
                 )
             };
-            transform.into()
+            let transform: Matrix4<f32> = transform.into();
+            transform.cast()
         }
         config::PositionMode::Hmd { distance } => {
             matrix![
                 1.0, 0.0, 0.0, 0.0;
                 0.0, 1.0, 0.0, 0.0;
-                0.0, 0.0, 1.0, -distance;
+                0.0, 0.0, 1.0, -distance as f64;
                 0.0, 0.0, 0.0, 1.0;
             ]
         }
@@ -228,8 +229,8 @@ fn main() -> Result<()> {
         device.clone(),
         textures[0].clone(),
         [-0.17, 0.021, -0.001],
-        [483.4, 453.6],
-        [489.2, 473.7],
+        [lhcfg.left.intrinsics.center_x as f32, lhcfg.left.intrinsics.center_y as f32],
+        [lhcfg.right.intrinsics.center_x as f32, lhcfg.right.intrinsics.center_y as f32],
         FOV,
     )?;
     let projector = match cfg.display_mode {
@@ -358,7 +359,7 @@ fn main() -> Result<()> {
                     * matrix![
                         1.0, 0.0, 0.0, 0.0;
                         0.0, 1.0, 0.0, 0.0;
-                        0.0, 0.0, 1.0, -distance;
+                        0.0, 0.0, 1.0, -distance as f64;
                         0.0, 0.0, 0.0, 1.0;
                     ];
                 unsafe {
@@ -377,9 +378,9 @@ fn main() -> Result<()> {
             let future = correction.correct(future, queue.clone(), textures[1].clone())?;
             // Finally apply projection
             // Calculate each eye's Model View Project matrix at the moment the current frame is taken
-            let (l, r) = projector.calculate_mvp(&overlay_transform, fov, &vrsys, &hmd_transform);
+            let (l, r) = projector.calculate_mvp(&overlay_transform, &lhcfg, &vrsys, &hmd_transform);
             let future =
-                projector.project(future, queue.clone(), output.clone(), 1.0, ipd, (&l, &r))?;
+                projector.project(future, queue.clone(), output.clone(), 1.0, ipd, &lhcfg, (&l, &r))?;
 
             // Wait for work to complete
             future.then_signal_fence().wait(None)?;

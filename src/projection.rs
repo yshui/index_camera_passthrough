@@ -77,15 +77,15 @@ fn format_matrix<
 use nalgebra::{iter::MatrixIter, matrix, Matrix4, RawStorage, Scalar};
 impl Projection {
     /// Calculate the _physical_ camera's MVP, for each eye.
-    /// camera_fov = focal length / sensor width.
+    /// camera_calib = camera calibration data.
     /// frame_time = how long after the first frame is the current frame taken
     /// time_origin = instant when the first frame is taken
     pub fn calculate_mvp(
         &self,
-        overlay_transform: &Matrix4<f32>,
-        camera_fov: f32,
+        overlay_transform: &Matrix4<f64>,
+        camera_calib: &crate::steam::StereoCamera,
         ivrsystem: &crate::openvr::VRSystem,
-        hmd_transform: &Matrix4<f32>,
+        hmd_transform: &Matrix4<f64>,
     ) -> (Matrix4<f32>, Matrix4<f32>) {
         let left_eye: Matrix4<_> = ivrsystem
             .pin_mut()
@@ -98,15 +98,15 @@ impl Projection {
 
         // Camera space to HMD space transform, based on physical measurements
         let left_cam: Matrix4<_> = matrix![
-            1.0, 0.0, 0.0, -0.067;
-            0.0, 1.0, 0.0, -0.039;
-            0.0, 0.0, 1.0, -0.07;
+            1.0, 0.0, 0.0, -camera_calib.left.extrinsics.position[0];
+            0.0, 1.0, 0.0, camera_calib.left.extrinsics.position[1];
+            0.0, 0.0, 1.0, -camera_calib.left.extrinsics.position[2];
             0.0, 0.0, 0.0, 1.0;
         ];
         let right_cam: Matrix4<_> = matrix![
-            1.0, 0.0, 0.0, 0.067;
-            0.0, 1.0, 0.0, -0.039;
-            0.0, 0.0, 1.0, -0.07;
+            1.0, 0.0, 0.0, -camera_calib.right.extrinsics.position[0];
+            0.0, 1.0, 0.0, camera_calib.right.extrinsics.position[1];
+            0.0, 0.0, 1.0, -camera_calib.right.extrinsics.position[2];
             0.0, 0.0, 0.0, 1.0;
         ];
 
@@ -121,24 +121,32 @@ impl Projection {
             .try_inverse()
             .expect("HMD transform not invertable?");
 
-        // X gets camera_fov / 2.0 because the source texture is a side-by-side stereo texture
+        // X gets fov / 2.0 because the source texture is a side-by-side stereo texture
         // X translation element is used to map them to left/right side of the texture,
         // respectively.
         //
-        // For debug only： Y should be negative because vulkan clip space has Y+ downward, while
-        // texture sampling has Y+ upward.
-        let camera_projection = matrix![
-            camera_fov / 2.0, 0.0, 0.0, 0.0;
-            0.0, camera_fov, 0.0, 0.0;
+        let camera_projection_left = matrix![
+            camera_calib.left.intrinsics.focal_x / 960.0 / 2.0, 0.0, 0.0, 0.0;
+            0.0, camera_calib.left.intrinsics.focal_y / 960.0 , 0.0, 0.0;
+            0.0, 0.0, -1.0, 0.0;
+            0.0, 0.0, 0.0, 1.0;
+        ];
+        let camera_projection_right = matrix![
+            camera_calib.right.intrinsics.focal_x / 960.0 / 2.0, 0.0, 0.0, 0.0;
+            0.0, camera_calib.right.intrinsics.focal_y / 960.0 , 0.0, 0.0;
             0.0, 0.0, -1.0, 0.0;
             0.0, 0.0, 0.0, 1.0;
         ];
         (
-            camera_projection * left_view * overlay_transform,
-            camera_projection * right_view * overlay_transform,
+            (camera_projection_left * left_view * overlay_transform).cast(),
+            (camera_projection_right * right_view * overlay_transform).cast(),
         )
     }
-    pub fn new(device: Arc<Device>, source: Arc<AttachmentImage>, mode: ProjectionMode) -> Result<Self> {
+    pub fn new(
+        device: Arc<Device>,
+        source: Arc<AttachmentImage>,
+        mode: ProjectionMode,
+    ) -> Result<Self> {
         let [w, h, _] = source.dimensions();
         if w != h * 2 {
             return Err(anyhow!("Input not square"));
@@ -177,7 +185,7 @@ impl Projection {
             render_pass,
             pipeline,
             source,
-            mode
+            mode,
         })
     }
     pub fn project(
@@ -187,6 +195,7 @@ impl Projection {
         output: Arc<AttachmentImage>,
         overlay_width: f32,
         ipd: f32,
+        camera_calib: &crate::steam::StereoCamera,
         (left, right): (&Matrix4<f32>, &Matrix4<f32>),
     ) -> Result<impl GpuFuture> {
         let framebuffer = Arc::new(
@@ -259,12 +268,16 @@ impl Projection {
         )
         .unwrap();
 
-        let eye_offset = if self.mode == ProjectionMode::FromEye { 0.067 - ipd / 2.0 } else { 0.0 };
+        let eye_offset = if self.mode == ProjectionMode::FromEye {
+            -camera_calib.left.extrinsics.position[0] as f32 - ipd / 2.0
+        } else {
+            0.0
+        };
         // Left
         let uniform1 = vs::ty::Transform {
             mvp: left.as_ref().clone(),
             overlayWidth: overlay_width,
-            eyeOffset: eye_offset,
+            eyeOffset: eye_offset as f32,
         };
         let uniform2 = fs::ty::Info {
             texOffset: [0.0, 0.0],
@@ -323,7 +336,7 @@ impl Projection {
         let uniform1 = vs::ty::Transform {
             mvp: right.as_ref().clone(),
             overlayWidth: overlay_width,
-            eyeOffset: -eye_offset,
+            eyeOffset: -eye_offset as f32,
         };
         let uniform2 = fs::ty::Info {
             texOffset: [0.5, 0.0],

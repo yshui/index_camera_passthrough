@@ -13,9 +13,13 @@ pub struct Distort {
 
 #[derive(Serialize, Deserialize, Clone, Copy)]
 pub struct Intrinsics {
+    /// Optical center X
     pub center_x: f64,
+    /// Optical center Y
     pub center_y: f64,
+    /// X focal length in device pixels
     pub focal_x: f64,
+    /// Y focal length in device pixels
     pub focal_y: f64,
     pub distort: Distort,
 }

@@ -9,6 +9,7 @@ edition = "2021"
 cxx = "1"
 autocxx = "0"
 nalgebra = "0.29"
+num = "0.4.0"
 
 [build-dependencies]
 autocxx-build = { path = "../autocxx/gen/build" }

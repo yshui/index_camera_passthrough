@@ -15,7 +15,7 @@ mode = "Hmd"
 ## only meaningful if mode is "Hmd"
 distance = 1.0
 
-## transformation matrix
+## transformation matrix for absolute position, column-major
 ## only meaningful if mode is "Absolute"
 # transform = [ [1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1] ]
 
