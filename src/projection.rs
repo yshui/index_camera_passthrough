@@ -38,21 +38,6 @@ mod fs {
     }
 }
 
-/// Because your eye and the camera is at different physical locations, it is impossible
-/// to project camera view into VR space perfectly. There are trade offs approximating
-/// this projection.
-///
-/// In FromCamera mode, we assume your eyes are at the cameras' physical location. This mode
-/// has larger viewing range, but everything will _seem_ smaller to you.
-///
-/// In FromEye mode, we assume your cameras are at your eyes' physical location. Everything will
-/// have right scale in this mode, but the viewing range is smaller.
-#[derive(Eq, PartialEq, Debug)]
-pub enum ProjectionMode {
-    FromCamera,
-    FromEye,
-}
-
 pub struct Projection {
     device: Arc<Device>,
     source: Arc<AttachmentImage>,
@@ -60,7 +45,7 @@ pub struct Projection {
     render_pass: Arc<RenderPass>,
     mode: ProjectionMode,
 }
-
+use crate::config::ProjectionMode;
 #[derive(Default, Debug, Clone)]
 struct Vertex {
     position: [f32; 2],
