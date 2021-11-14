@@ -27,7 +27,7 @@ use vulkano::{
 mod vs {
     vulkano_shaders::shader! {
         ty: "vertex",
-        path: "shaders/trivial.vert",
+        path: "shaders/projection.vert",
     }
 }
 
@@ -276,26 +276,37 @@ impl Projection {
 
         let eye_offset = if self.mode == ProjectionMode::FromEye { 0.067 - ipd / 2.0 } else { 0.0 };
         // Left
-        let uniform = fs::ty::Info {
+        let uniform1 = vs::ty::Transform {
             mvp: left.as_ref().clone(),
-            texOffset: [0.0, 0.0],
             overlayWidth: overlay_width,
-            windowSize: [(w / 2) as f32, h as f32],
             eyeOffset: eye_offset,
         };
-        let uniform = CpuAccessibleBuffer::from_data(
+        let uniform2 = fs::ty::Info {
+            texOffset: [0.0, 0.0],
+        };
+        let uniform1 = CpuAccessibleBuffer::from_data(
             self.device.clone(),
             BufferUsage {
                 uniform_buffer: true,
                 ..BufferUsage::none()
             },
             false,
-            uniform,
+            uniform1,
+        )?;
+        let uniform2 = CpuAccessibleBuffer::from_data(
+            self.device.clone(),
+            BufferUsage {
+                uniform_buffer: true,
+                ..BufferUsage::none()
+            },
+            false,
+            uniform2,
         )?;
         let mut desc_set_builder = desc_set_pool.next();
         desc_set_builder
-            .add_buffer(uniform)?
-            .add_sampled_image(ImageView::new(self.source.clone())?, sampler.clone())?;
+            .add_buffer(uniform1)?
+            .add_sampled_image(ImageView::new(self.source.clone())?, sampler.clone())?
+            .add_buffer(uniform2)?;
         let desc_set = Arc::new(desc_set_builder.build()?);
 
         cmdbuf
@@ -324,26 +335,37 @@ impl Projection {
             .end_render_pass()?;
 
         // Right
-        let uniform = fs::ty::Info {
+        let uniform1 = vs::ty::Transform {
             mvp: right.as_ref().clone(),
-            texOffset: [0.5, 0.0],
             overlayWidth: overlay_width,
-            windowSize: [(w / 2) as f32, h as f32],
-            eyeOffset: eye_offset,
+            eyeOffset: -eye_offset,
         };
-        let uniform = CpuAccessibleBuffer::from_data(
+        let uniform2 = fs::ty::Info {
+            texOffset: [0.5, 0.0],
+        };
+        let uniform1 = CpuAccessibleBuffer::from_data(
             self.device.clone(),
             BufferUsage {
                 uniform_buffer: true,
                 ..BufferUsage::none()
             },
             false,
-            uniform,
+            uniform1,
+        )?;
+        let uniform2 = CpuAccessibleBuffer::from_data(
+            self.device.clone(),
+            BufferUsage {
+                uniform_buffer: true,
+                ..BufferUsage::none()
+            },
+            false,
+            uniform2,
         )?;
         let mut desc_set_builder = desc_set_pool.next();
         desc_set_builder
-            .add_buffer(uniform)?
-            .add_sampled_image(ImageView::new(self.source.clone())?, sampler.clone())?;
+            .add_buffer(uniform1)?
+            .add_sampled_image(ImageView::new(self.source.clone())?, sampler.clone())?
+            .add_buffer(uniform2)?;
         let desc_set = Arc::new(desc_set_builder.build()?);
 
         cmdbuf
