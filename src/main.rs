@@ -22,7 +22,6 @@ use vulkano::{
 use yuv::GpuYuyvConverter;
 /// Camera image will be (size * 2, size)
 const CAMERA_SIZE: u32 = 960;
-const FOV: f32 = 0.428;
 #[allow(unused_imports)]
 use log::info;
 
@@ -225,13 +224,10 @@ fn main() -> Result<()> {
     // textures[0] -> Lens correction -> textures[1]
     // textures[1] -> projection -> Final output
     let converter = GpuYuyvConverter::new(device.clone(), CAMERA_SIZE * 2, CAMERA_SIZE)?;
-    let (correction, fov) = distortion_correction::StereoCorrection::new(
+    let (correction, fov_left, fov_right) = distortion_correction::StereoCorrection::new(
         device.clone(),
         textures[0].clone(),
-        [-0.17, 0.021, -0.001],
-        [lhcfg.left.intrinsics.center_x as f32, lhcfg.left.intrinsics.center_y as f32],
-        [lhcfg.right.intrinsics.center_x as f32, lhcfg.right.intrinsics.center_y as f32],
-        FOV,
+        &lhcfg,
     )?;
     let projector = match cfg.display_mode {
         config::DisplayMode::Stereo { projection_mode } => Some(projection::Projection::new(
@@ -272,7 +268,7 @@ fn main() -> Result<()> {
             None
         }
     };
-    log::info!("Adjusted FOV: {}", fov);
+    log::info!("Adjusted FOV: {:?} {:?}", fov_left, fov_right);
 
     // Fetch the first camera frame
     let (mut frame, mut metadata) = v4l::io::traits::CaptureStream::next(&mut video_stream)?;
@@ -378,7 +374,7 @@ fn main() -> Result<()> {
             let future = correction.correct(future, queue.clone(), textures[1].clone())?;
             // Finally apply projection
             // Calculate each eye's Model View Project matrix at the moment the current frame is taken
-            let (l, r) = projector.calculate_mvp(&overlay_transform, &lhcfg, &vrsys, &hmd_transform);
+            let (l, r) = projector.calculate_mvp(&overlay_transform, &lhcfg, (&fov_left, &fov_right), &vrsys, &hmd_transform);
             let future =
                 projector.project(future, queue.clone(), output.clone(), 1.0, ipd, &lhcfg, (&l, &r))?;
 

@@ -78,12 +78,14 @@ use nalgebra::{iter::MatrixIter, matrix, Matrix4, RawStorage, Scalar};
 impl Projection {
     /// Calculate the _physical_ camera's MVP, for each eye.
     /// camera_calib = camera calibration data.
+    /// fov_left/right = adjusted fovs, in ratio (not in pixels)
     /// frame_time = how long after the first frame is the current frame taken
     /// time_origin = instant when the first frame is taken
     pub fn calculate_mvp(
         &self,
         overlay_transform: &Matrix4<f64>,
         camera_calib: &crate::steam::StereoCamera,
+        (fov_left, fov_right): (&[f64; 2], &[f64; 2]),
         ivrsystem: &crate::openvr::VRSystem,
         hmd_transform: &Matrix4<f64>,
     ) -> (Matrix4<f32>, Matrix4<f32>) {
@@ -126,14 +128,14 @@ impl Projection {
         // respectively.
         //
         let camera_projection_left = matrix![
-            camera_calib.left.intrinsics.focal_x / 960.0 / 2.0, 0.0, 0.0, 0.0;
-            0.0, camera_calib.left.intrinsics.focal_y / 960.0 , 0.0, 0.0;
+            fov_left[0] / 2.0, 0.0, 0.0, 0.0;
+            0.0, fov_left[1], 0.0, 0.0;
             0.0, 0.0, -1.0, 0.0;
             0.0, 0.0, 0.0, 1.0;
         ];
         let camera_projection_right = matrix![
-            camera_calib.right.intrinsics.focal_x / 960.0 / 2.0, 0.0, 0.0, 0.0;
-            0.0, camera_calib.right.intrinsics.focal_y / 960.0 , 0.0, 0.0;
+            fov_right[0] / 2.0, 0.0, 0.0, 0.0;
+            0.0, fov_right[1] , 0.0, 0.0;
             0.0, 0.0, -1.0, 0.0;
             0.0, 0.0, 0.0, 1.0;
         ];
