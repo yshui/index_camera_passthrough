@@ -91,15 +91,15 @@ pub enum Button {
     B,
 }
 
-impl Into<openvr_sys::EVRButtonId> for Button {
-    fn into(self) -> openvr_sys::EVRButtonId {
+impl From<Button> for openvr_sys::EVRButtonId {
+    fn from(b: Button) -> Self {
         use openvr_sys::EVRButtonId;
-        match self {
-            Self::Menu => EVRButtonId::k_EButton_ApplicationMenu,
-            Self::Grip => EVRButtonId::k_EButton_Grip,
-            Self::Trigger => EVRButtonId::k_EButton_Axis1,
-            Self::A => EVRButtonId::k_EButton_Grip,
-            Self::B => EVRButtonId::k_EButton_ApplicationMenu,
+        match b {
+            Button::Menu => EVRButtonId::k_EButton_ApplicationMenu,
+            Button::Grip => EVRButtonId::k_EButton_Grip,
+            Button::Trigger => EVRButtonId::k_EButton_Axis1,
+            Button::A => EVRButtonId::k_EButton_Grip,
+            Button::B => EVRButtonId::k_EButton_ApplicationMenu,
         }
     }
 }

@@ -64,7 +64,7 @@ fn load_splash(
     let mut cmdbuf =
         AutoCommandBufferBuilder::primary(device.clone(), queue.family(), OneTimeSubmit)?;
     let output = AttachmentImage::with_usage(
-        device.clone(),
+        device,
         [CAMERA_SIZE * 2, CAMERA_SIZE],
         R8G8B8A8_UNORM,
         ImageUsage {
@@ -81,7 +81,7 @@ fn load_splash(
     cmdbuf.copy_buffer_to_image(subbuffer, output.clone())?;
     cmdbuf
         .build()?
-        .execute(queue.clone())?
+        .execute(queue)?
         .then_signal_fence()
         .wait(None)?;
     Ok(output)
