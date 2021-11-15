@@ -177,7 +177,7 @@ impl GpuYuyvConverter {
         }
         // Submit the source image to GPU
         let subbuffer = buffer
-            .chunk(buf.iter().map(|x| *x))
+            .chunk(buf.iter().copied())
             .map_err(|e| ConverterError::Anyhow(e.into()))?;
         let mut cmdbuf =
             AutoCommandBufferBuilder::primary(self.device.clone(), queue.family(), OneTimeSubmit)?;
@@ -207,12 +207,12 @@ impl GpuYuyvConverter {
         .unwrap();
         let framebuffer = Arc::new(
             Framebuffer::start(self.render_pass.clone())
-                .add(ImageView::new(output.clone())?)?
+                .add(ImageView::new(output)?)?
                 .build()?,
         );
         cmdbuf
             .begin_render_pass(
-                framebuffer.clone(),
+                framebuffer,
                 SubpassContents::Inline,
                 [vulkano::format::ClearValue::None],
             )

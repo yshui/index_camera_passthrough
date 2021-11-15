@@ -1,14 +1,17 @@
 #![feature(untagged_unions, try_trait_v2, destructuring_assignment)]
 mod config;
 mod distortion_correction;
+mod events;
 mod openvr;
 mod projection;
 mod steam;
 mod yuv;
 
+use std::sync::Arc;
+
 use anyhow::{anyhow, Context, Result};
 use ash::vk::Handle;
-use nalgebra::{Matrix4, matrix};
+use nalgebra::{matrix, Matrix4};
 use openvr::*;
 use v4l::video::Capture;
 use vulkano::{
@@ -42,6 +45,46 @@ fn find_index_camera() -> Result<std::path::PathBuf> {
         .devnode()
         .with_context(|| anyhow!("Index camera cannot be accessed"))?;
     Ok(devnode.to_owned())
+}
+
+static SPLASH_IMAGE: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/splash.png"));
+fn load_splash(
+    device: Arc<vulkano::device::Device>,
+    queue: Arc<vulkano::device::Queue>,
+    buffer: &CpuBufferPool<u8>,
+) -> Result<Arc<vulkano::image::AttachmentImage>> {
+    use vulkano::{
+        command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage::*, PrimaryCommandBuffer},
+        format::Format::*,
+        image::AttachmentImage,
+    };
+    let img =
+        image::load_from_memory_with_format(SPLASH_IMAGE, image::ImageFormat::Png)?.to_rgba8();
+    let subbuffer = buffer.chunk(img.as_raw().iter().copied())?;
+    let mut cmdbuf =
+        AutoCommandBufferBuilder::primary(device.clone(), queue.family(), OneTimeSubmit)?;
+    let output = AttachmentImage::with_usage(
+        device.clone(),
+        [CAMERA_SIZE * 2, CAMERA_SIZE],
+        R8G8B8A8_UNORM,
+        ImageUsage {
+            transfer_source: false,
+            transfer_destination: true,
+            sampled: true,
+            storage: false,
+            color_attachment: true,
+            depth_stencil_attachment: false,
+            transient_attachment: false,
+            input_attachment: false,
+        },
+    )?;
+    cmdbuf.copy_buffer_to_image(subbuffer, output.clone())?;
+    cmdbuf
+        .build()?
+        .execute(queue.clone())?
+        .then_signal_fence()
+        .wait(None)?;
+    Ok(output)
 }
 
 fn main() -> Result<()> {
@@ -126,7 +169,7 @@ fn main() -> Result<()> {
         let extensions = device::DeviceExtensions::from(
             vrsys.compositor().required_extensions(device, &mut buf),
         )
-        .union(&device.required_extensions());
+        .union(device.required_extensions());
         device::Device::new(
             device,
             &device::Features::none(),
@@ -136,6 +179,8 @@ fn main() -> Result<()> {
     };
     let queue = queues.next().unwrap();
     let buffer = CpuBufferPool::upload(device.clone());
+
+    let splash = load_splash(device.clone(), queue.clone(), &buffer)?;
 
     // Load steam calibration data
     let hmd_id = vrsys.find_hmd().with_context(|| anyhow!("HMD not found"))?;
@@ -151,10 +196,16 @@ fn main() -> Result<()> {
         )
     };
     if error != openvr_sys::ETrackedPropertyError::TrackedProp_Success {
-        return Err(anyhow!("Cannot get HMD's serial number"))
+        return Err(anyhow!("Cannot get HMD's serial number"));
     }
-    let lhcfg = steam::load_steam_config(std::str::from_utf8(&serial_number[..serial_number_len as usize-1])?).unwrap_or_else(|e| {
-        log::warn!("Cannot find camera calibration data, using default ones {}", e.to_string());
+    let lhcfg = steam::load_steam_config(std::str::from_utf8(
+        &serial_number[..serial_number_len as usize - 1],
+    )?)
+    .unwrap_or_else(|e| {
+        log::warn!(
+            "Cannot find camera calibration data, using default ones {}",
+            e.to_string()
+        );
         steam::default_lighthouse_config()
     });
     log::info!("{}", serde_json::to_string(&lhcfg)?);
@@ -172,30 +223,6 @@ fn main() -> Result<()> {
             )
             .into_result()?;
     }
-
-    let mut overlay_transform: Matrix4<f64> = match cfg.overlay.position {
-        config::PositionMode::Absolute { transform } => {
-            let mut transformation = openvr_sys::HmdMatrix34_t { m: [[0.0; 4]; 3] };
-            transformation.m[..].copy_from_slice(&transform[..3]);
-            unsafe {
-                vroverlay.pin_mut().SetOverlayTransformAbsolute(
-                    overlay.as_raw(),
-                    openvr_sys::ETrackingUniverseOrigin::TrackingUniverseStanding,
-                    &transformation,
-                )
-            };
-            let transform: Matrix4<f32> = transform.into();
-            transform.cast()
-        }
-        config::PositionMode::Hmd { distance } => {
-            matrix![
-                1.0, 0.0, 0.0, 0.0;
-                0.0, 1.0, 0.0, 0.0;
-                0.0, 0.0, 1.0, -distance as f64;
-                0.0, 0.0, 0.0, 1.0;
-            ]
-        }
-    };
 
     // Allocate intermediate textures
     let textures: Result<Vec<_>> = (0..2)
@@ -217,18 +244,6 @@ fn main() -> Result<()> {
         .collect();
     let textures = textures?;
 
-    // Create post-processing stages
-    //
-    // Camera data -> upload -> internal texture
-    // internal texture -> YUYV conversion -> textures[0]
-    // textures[0] -> Lens correction -> textures[1]
-    // textures[1] -> projection -> Final output
-    let converter = GpuYuyvConverter::new(device.clone(), CAMERA_SIZE * 2, CAMERA_SIZE)?;
-    let (correction, fov_left, fov_right) = distortion_correction::StereoCorrection::new(
-        device.clone(),
-        textures[0].clone(),
-        &lhcfg,
-    )?;
     let projector = match cfg.display_mode {
         config::DisplayMode::Stereo { projection_mode } => Some(projection::Projection::new(
             device.clone(),
@@ -268,6 +283,67 @@ fn main() -> Result<()> {
             None
         }
     };
+
+    let hmd_transform = vrsys.hmd_transform(0.0);
+    let mut overlay_transform: Matrix4<f64> = match cfg.overlay.position {
+        config::PositionMode::Absolute { transform } => {
+            let mut transformation = openvr_sys::HmdMatrix34_t { m: [[0.0; 4]; 3] };
+            transformation.m[..].copy_from_slice(&transform[..3]);
+            unsafe {
+                vroverlay.pin_mut().SetOverlayTransformAbsolute(
+                    overlay.as_raw(),
+                    openvr_sys::ETrackingUniverseOrigin::TrackingUniverseStanding,
+                    &transformation,
+                )
+            };
+            let transform: Matrix4<f32> = transform.into();
+            transform.cast()
+        }
+        config::PositionMode::Hmd { distance } => {
+            hmd_transform
+                * matrix![
+                    1.0, 0.0, 0.0, 0.0;
+                    0.0, 1.0, 0.0, 0.0;
+                    0.0, 0.0, 1.0, -distance as f64;
+                    0.0, 0.0, 0.0, 1.0;
+                ]
+        }
+    };
+
+    // Set initial position for overlay
+    unsafe {
+        vroverlay.pin_mut().SetOverlayTransformAbsolute(
+            overlay.as_raw(),
+            openvr_sys::ETrackingUniverseOrigin::TrackingUniverseStanding,
+            &(&overlay_transform).into(),
+        )
+    };
+
+    // Show splash screen
+    overlay.set_texture(
+        CAMERA_SIZE * 2,
+        CAMERA_SIZE,
+        splash,
+        device.clone(),
+        queue.clone(),
+        instance.clone(),
+    )?;
+
+    // Show overlay
+    vroverlay
+        .pin_mut()
+        .ShowOverlay(overlay.as_raw())
+        .into_result()?;
+
+    // Create post-processing stages
+    //
+    // Camera data -> upload -> internal texture
+    // internal texture -> YUYV conversion -> textures[0]
+    // textures[0] -> Lens correction -> textures[1]
+    // textures[1] -> projection -> Final output
+    let converter = GpuYuyvConverter::new(device.clone(), CAMERA_SIZE * 2, CAMERA_SIZE)?;
+    let (correction, fov_left, fov_right) =
+        distortion_correction::StereoCorrection::new(device.clone(), textures[0].clone(), &lhcfg)?;
     log::info!("Adjusted FOV: {:?} {:?}", fov_left, fov_right);
 
     // Fetch the first camera frame
@@ -287,6 +363,8 @@ fn main() -> Result<()> {
         return Err(anyhow!("Cannot get device IPD {:?}", error));
     }
     log::info!("IPD: {}", ipd);
+
+    let mut state = events::State::new(cfg.toggle_button, cfg.open_delay);
     'main_loop: loop {
         // We try to get the pose at the time when the camera frame is captured. GetDeviceToAbsoluteTrackingPose
         // doesn't specifically say if a negative time offset will work...
@@ -300,20 +378,11 @@ fn main() -> Result<()> {
         );
         let mut elapsed = std::time::Instant::now() - first_frame_instant;
         if elapsed > frame_time {
-            elapsed = elapsed - frame_time;
+            elapsed -= frame_time;
         } else {
             elapsed = std::time::Duration::ZERO;
         }
-        let mut hmd_transform = std::mem::MaybeUninit::<openvr_sys::TrackedDevicePose_t>::uninit();
-        let hmd_transform = unsafe {
-            vrsys.pin_mut().GetDeviceToAbsoluteTrackingPose(
-                openvr_sys::ETrackingUniverseOrigin::TrackingUniverseStanding,
-                -elapsed.as_secs_f32(),
-                hmd_transform.as_mut_ptr(),
-                1,
-            );
-            hmd_transform.assume_init().mDeviceToAbsoluteTracking.into()
-        };
+        let hmd_transform = vrsys.hmd_transform(-elapsed.as_secs_f32());
         // Allocate final image
         let output = vulkano::image::AttachmentImage::with_usage(
             device.clone(),
@@ -374,9 +443,22 @@ fn main() -> Result<()> {
             let future = correction.correct(future, queue.clone(), textures[1].clone())?;
             // Finally apply projection
             // Calculate each eye's Model View Project matrix at the moment the current frame is taken
-            let (l, r) = projector.calculate_mvp(&overlay_transform, &lhcfg, (&fov_left, &fov_right), &vrsys, &hmd_transform);
-            let future =
-                projector.project(future, queue.clone(), output.clone(), 1.0, ipd, &lhcfg, (&l, &r))?;
+            let (l, r) = projector.calculate_mvp(
+                &overlay_transform,
+                &lhcfg,
+                (&fov_left, &fov_right),
+                &vrsys,
+                &hmd_transform,
+            );
+            let future = projector.project(
+                future,
+                queue.clone(),
+                output.clone(),
+                1.0,
+                ipd,
+                &lhcfg,
+                (&l, &r),
+            )?;
 
             // Wait for work to complete
             future.then_signal_fence().wait(None)?;
@@ -403,13 +485,6 @@ fn main() -> Result<()> {
             queue.clone(),
             instance.clone(),
         )?;
-        if !vroverlay.pin_mut().IsOverlayVisible(overlay.as_raw()) {
-            // Display the overlay
-            vroverlay
-                .pin_mut()
-                .ShowOverlay(overlay.as_raw())
-                .into_result()?;
-        }
 
         let mut event = std::mem::MaybeUninit::<openvr_sys::VREvent_t>::uninit();
         // Handle OpenVR events
@@ -435,6 +510,7 @@ fn main() -> Result<()> {
                 ipd = unsafe { event.data.ipd.ipdMeters };
                 log::info!("ipd: {}", ipd);
             }
+            state.handle(event);
         }
 
         // Handle Ctrl-C
@@ -442,8 +518,24 @@ fn main() -> Result<()> {
             break;
         }
 
-        // Fetch next frame
-        (frame, metadata) = v4l::io::traits::CaptureStream::next(&mut video_stream)?;
+        match state.turn() {
+            events::Action::ShowOverlay => vroverlay
+                .pin_mut()
+                .ShowOverlay(overlay.as_raw())
+                .into_result()?,
+            events::Action::HideOverlay => vroverlay
+                .pin_mut()
+                .HideOverlay(overlay.as_raw())
+                .into_result()?,
+            _ => (),
+        }
+
+        std::thread::sleep(state.interval());
+
+        if state.visible() {
+            // Fetch next frame only when overlay is visible
+            (frame, metadata) = v4l::io::traits::CaptureStream::next(&mut video_stream)?;
+        }
     }
 
     Ok(())

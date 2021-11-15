@@ -69,7 +69,7 @@ impl StereoCorrection {
         }
         // Give up
         info!("Cannot find scale");
-        return None;
+        None
     }
     // Find a scale that maps the middle point of 4 edges of the undistorted image to
     // the edge of the field of view of the distorted image.
@@ -129,8 +129,8 @@ impl StereoCorrection {
             camera_calib.right.intrinsics.focal_x / size,
             camera_calib.right.intrinsics.focal_y / size,
         ];
-        let coeff_left = camera_calib.left.intrinsics.distort.coeffs.clone();
-        let coeff_right = camera_calib.left.intrinsics.distort.coeffs.clone();
+        let coeff_left = camera_calib.left.intrinsics.distort.coeffs;
+        let coeff_right = camera_calib.left.intrinsics.distort.coeffs;
         let vs = vs::Shader::load(device.clone())?;
         let fs = fs::Shader::load(device.clone())?;
         let render_pass1 = Arc::new(
@@ -262,7 +262,7 @@ impl StereoCorrection {
 
         desc_set_builder
             .add_buffer(uniform)?
-            .add_sampled_image(ImageView::new(input.clone())?, sampler)?;
+            .add_sampled_image(ImageView::new(input)?, sampler)?;
         let desc_set2 = Arc::new(desc_set_builder.build()?);
 
         Ok((
@@ -330,7 +330,7 @@ impl StereoCorrection {
         );
         cmdbuf
             .begin_render_pass(
-                framebuffer.clone(),
+                framebuffer,
                 SubpassContents::Inline,
                 [vulkano::format::ClearValue::None],
             )?
@@ -347,12 +347,12 @@ impl StereoCorrection {
         // Right side
         let framebuffer = Arc::new(
             Framebuffer::start(self.render_pass2.clone())
-                .add(ImageView::new(output.clone())?)?
+                .add(ImageView::new(output)?)?
                 .build()?,
         );
         cmdbuf
             .begin_render_pass(
-                framebuffer.clone(),
+                framebuffer,
                 SubpassContents::Inline,
                 [vulkano::format::ClearValue::None],
             )?

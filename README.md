@@ -5,16 +5,18 @@ Index camera passthrough
 
 The problem that the Index camera doesn't work on Linux has been there for a long time, see [ValveSoftware/SteamVR-for-Linux#231](https://github.com/ValveSoftware/SteamVR-for-Linux/issues/231). And Valve doesn't seem to be willing to address it. So I decided to throw something together.
 
-## Current status
+## Features
 
-For now this application can create an overlay in your game world that acts as a portal to real world. You can configure the overlay to be in one place, or stay in front of you. This behavior is disabled by default, see [the example config file](index_camera_passthrough.toml) for how to enable and more options.
+- Stereo overlay: the overlay in your game world that acts as a portal to real world. Meaning you see in 3D. (disabled by default, see [the example config file](index_camera_passthrough.toml) for how to enable and more options.)
+- You can configure the overlay to be in one place, or stay in front of you.
+- Use camera calibration data from your Steam installation.
+- Show/hide passthrough with button presses
 
-This program also reads camera calibration data directly from your Steam installation.
+See also [the example config file](index_camera_passthrough.toml)
 
 ## TODO
 
 * Add option to make overlay follow controller.
-* Open/close overlay
 * (Unrealistic) implement Valve's "3D" passthrough. To do this we essentially need to do 3D reconstruction from the stereo camera. There are existing methods, but will be really challenging to implement.
 
 ## Contribute

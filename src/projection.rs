@@ -221,7 +221,7 @@ impl Projection {
             [0, 0, 0],
             0,
             0,
-            output.clone(),
+            output,
             [0, 0, 0],
             0,
             0,
@@ -277,7 +277,7 @@ impl Projection {
         };
         // Left
         let uniform1 = vs::ty::Transform {
-            mvp: left.as_ref().clone(),
+            mvp: *left.as_ref(),
             overlayWidth: overlay_width,
             eyeOffset: eye_offset as f32,
         };
@@ -336,7 +336,7 @@ impl Projection {
 
         // Right
         let uniform1 = vs::ty::Transform {
-            mvp: right.as_ref().clone(),
+            mvp: *right.as_ref(),
             overlayWidth: overlay_width,
             eyeOffset: -eye_offset as f32,
         };
@@ -364,13 +364,13 @@ impl Projection {
         let mut desc_set_builder = desc_set_pool.next();
         desc_set_builder
             .add_buffer(uniform1)?
-            .add_sampled_image(ImageView::new(self.source.clone())?, sampler.clone())?
+            .add_sampled_image(ImageView::new(self.source.clone())?, sampler)?
             .add_buffer(uniform2)?;
         let desc_set = Arc::new(desc_set_builder.build()?);
 
         cmdbuf
             .begin_render_pass(
-                framebuffer.clone(),
+                framebuffer,
                 SubpassContents::Inline,
                 [vulkano::format::ClearValue::None],
             )?

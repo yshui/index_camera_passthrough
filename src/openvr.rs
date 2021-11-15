@@ -68,10 +68,10 @@ impl VRSystem {
         error.into_result()?;
         Ok(Self(isystem_raw, Cell::new(None)))
     }
-    pub fn overlay<'a>(&'a self) -> VROverlay<'a> {
+    pub fn overlay(&self) -> VROverlay<'_> {
         VROverlay(openvr_sys::VROverlay(), self)
     }
-    pub fn compositor<'a>(&'a self) -> VRCompositor<'a> {
+    pub fn compositor(&self) -> VRCompositor<'_> {
         VRCompositor(openvr_sys::VRCompositor(), PhantomData)
     }
     fn hold_vulkan_device(&self, device: Arc<Device>) {
@@ -85,6 +85,18 @@ impl VRSystem {
             }
         }
         None
+    }
+    pub fn hmd_transform(&self, time_offset: f32) -> nalgebra::Matrix4<f64> {
+        let mut hmd_transform = std::mem::MaybeUninit::<openvr_sys::TrackedDevicePose_t>::uninit();
+        unsafe {
+            self.pin_mut().GetDeviceToAbsoluteTrackingPose(
+                openvr_sys::ETrackingUniverseOrigin::TrackingUniverseStanding,
+                time_offset,
+                hmd_transform.as_mut_ptr(),
+                1,
+            );
+            hmd_transform.assume_init().mDeviceToAbsoluteTracking.into()
+        }
     }
     pub fn pin_mut(&self) -> Pin<&mut openvr_sys::IVRSystem> {
         unsafe { Pin::new_unchecked(&mut *self.0) }
@@ -196,7 +208,7 @@ impl<'a> Drop for VROverlayHandle<'a> {
     fn drop(&mut self) {
         log::info!("Dropping overlay handle");
         if let Err(e) = unsafe { self.ivr_overlay.destroy_overlay_raw(self.raw) } {
-            eprintln!("{}", e.to_string());
+            eprintln!("{}", e);
         }
     }
 }

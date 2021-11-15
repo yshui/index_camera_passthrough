@@ -82,8 +82,38 @@ pub struct OverlayConfig {
 
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
+pub enum Button {
+    Menu,
+    Grip,
+    Trigger,
+    A,
+    B,
+}
+
+impl Into<openvr_sys::EVRButtonId> for Button {
+    fn into(self) -> openvr_sys::EVRButtonId {
+        use openvr_sys::EVRButtonId;
+        match self {
+            Self::Menu => EVRButtonId::k_EButton_ApplicationMenu,
+            Self::Grip => EVRButtonId::k_EButton_Grip,
+            Self::Trigger => EVRButtonId::k_EButton_Axis1,
+            Self::A => EVRButtonId::k_EButton_Grip,
+            Self::B => EVRButtonId::k_EButton_ApplicationMenu,
+        }
+    }
+}
+
+pub const fn default_toggle_button() -> Button {
+    Button::Menu
+}
+
+pub const fn default_open_delay() -> std::time::Duration {
+    std::time::Duration::ZERO
+}
+
 /// Index camera passthrough
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
     /// camera device to use. auto detect if not set
     #[serde(default)]
@@ -94,10 +124,31 @@ pub struct Config {
     /// how is the camera view displayed on the overlay
     #[serde(default)]
     pub display_mode: DisplayMode,
+    /// which button should toggle the overlay visibility. press things
+    /// button on both controllers to toggle the overlay.
+    #[serde(default = "default_toggle_button")]
+    pub toggle_button: Button,
+    /// how long does the button need to be held before the overlay open,
+    /// closing the overlay is always instantaneous
+    #[serde(default = "default_open_delay", with = "humantime_serde")]
+    pub open_delay: std::time::Duration,
     /// enable debug option, including:
     ///   - use trigger button to do renderdoc capture
     #[serde(default)]
     pub debug: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            camera_device: "".to_owned(),
+            overlay: Default::default(),
+            display_mode: Default::default(),
+            toggle_button: default_toggle_button(),
+            open_delay: std::time::Duration::ZERO,
+            debug: false,
+        }
+    }
 }
 
 use anyhow::Result;
