@@ -8,7 +8,7 @@ layout(binding = 0) uniform Transform {
 layout(location = 1) out vec3 texCoord;
 
 void main() {
-	vec2 pos = (position + eyeOffset) * overlayWidth / 2.0;
+	vec2 pos = vec2(position.x + eyeOffset, position.y) * overlayWidth / 2.0;
 	// Change coordinate system: mvp is y up, position is y down
 	pos.y = -pos.y;
 
