@@ -366,125 +366,127 @@ fn main() -> Result<()> {
 
     let mut state = events::State::new(cfg.toggle_button, cfg.open_delay);
     'main_loop: loop {
-        // We try to get the pose at the time when the camera frame is captured. GetDeviceToAbsoluteTrackingPose
-        // doesn't specifically say if a negative time offset will work...
-        // also, do this as early as possible.
-        let frame_time =
-            Into::<std::time::Duration>::into(metadata.timestamp) - first_frame_timestamp;
-        log::trace!(
-            "{:?} {:?}",
-            std::time::Instant::now() - first_frame_instant,
-            frame_time
-        );
-        let mut elapsed = std::time::Instant::now() - first_frame_instant;
-        if elapsed > frame_time {
-            elapsed -= frame_time;
-        } else {
-            elapsed = std::time::Duration::ZERO;
-        }
-        let hmd_transform = vrsys.hmd_transform(-elapsed.as_secs_f32());
-        // Allocate final image
-        let output = vulkano::image::AttachmentImage::with_usage(
-            device.clone(),
-            [CAMERA_SIZE * 2, CAMERA_SIZE],
-            vulkano::format::Format::R8G8B8A8_UNORM,
-            vulkano::image::ImageUsage {
-                transfer_source: true,
-                transfer_destination: true,
-                sampled: true,
-                storage: false,
-                color_attachment: true,
-                depth_stencil_attachment: false,
-                transient_attachment: false,
-                input_attachment: false,
-            },
-        )?;
-
-        if capture {
-            if let Some(rd) = rd.as_mut() {
-                log::info!("Start Capture");
-                rd.start_frame_capture(std::ptr::null(), std::ptr::null());
-            }
-        }
-        // First convert YUYV to RGB
-        let future = converter.yuyv_buffer_to_vulkan_image(
-            frame,
-            vulkano::sync::now(device.clone()),
-            queue.clone(),
-            &buffer,
-            textures[0].clone(),
-        )?;
-
-        match cfg.overlay.position {
-            config::PositionMode::Absolute { .. } => (),
-            config::PositionMode::Hmd { distance } => {
-                // We only move the overlay when we get new camera frame
-                // this way the overlay should be reprojected correctly in-between
-                overlay_transform = hmd_transform
-                    * matrix![
-                        1.0, 0.0, 0.0, 0.0;
-                        0.0, 1.0, 0.0, 0.0;
-                        0.0, 0.0, 1.0, -distance as f64;
-                        0.0, 0.0, 0.0, 1.0;
-                    ];
-                unsafe {
-                    vroverlay.pin_mut().SetOverlayTransformAbsolute(
-                        overlay.as_raw(),
-                        openvr_sys::ETrackingUniverseOrigin::TrackingUniverseStanding,
-                        &(&overlay_transform).into(),
-                    )
-                };
-            }
-        };
-
-        // TODO combine correction and projection
-        if let Some(projector) = projector.as_ref() {
-            // Then do lens correction
-            let future = correction.correct(future, queue.clone(), textures[1].clone())?;
-            // Finally apply projection
-            // Calculate each eye's Model View Project matrix at the moment the current frame is taken
-            let (l, r) = projector.calculate_mvp(
-                &overlay_transform,
-                &lhcfg,
-                (&fov_left, &fov_right),
-                &vrsys,
-                &hmd_transform,
+        if state.visible() {
+            // We try to get the pose at the time when the camera frame is captured. GetDeviceToAbsoluteTrackingPose
+            // doesn't specifically say if a negative time offset will work...
+            // also, do this as early as possible.
+            let frame_time =
+                Into::<std::time::Duration>::into(metadata.timestamp) - first_frame_timestamp;
+            log::trace!(
+                "{:?} {:?}",
+                std::time::Instant::now() - first_frame_instant,
+                frame_time
             );
-            let future = projector.project(
-                future,
-                queue.clone(),
-                output.clone(),
-                1.0,
-                ipd,
-                &lhcfg,
-                (&l, &r),
+            let mut elapsed = std::time::Instant::now() - first_frame_instant;
+            if elapsed > frame_time {
+                elapsed -= frame_time;
+            } else {
+                elapsed = std::time::Duration::ZERO;
+            }
+            let hmd_transform = vrsys.hmd_transform(-elapsed.as_secs_f32());
+            // Allocate final image
+            let output = vulkano::image::AttachmentImage::with_usage(
+                device.clone(),
+                [CAMERA_SIZE * 2, CAMERA_SIZE],
+                vulkano::format::Format::R8G8B8A8_UNORM,
+                vulkano::image::ImageUsage {
+                    transfer_source: true,
+                    transfer_destination: true,
+                    sampled: true,
+                    storage: false,
+                    color_attachment: true,
+                    depth_stencil_attachment: false,
+                    transient_attachment: false,
+                    input_attachment: false,
+                },
             )?;
 
-            // Wait for work to complete
-            future.then_signal_fence().wait(None)?;
-        } else {
-            // Lens correction
-            let future = correction.correct(future, queue.clone(), output.clone())?;
-            future.then_signal_fence().wait(None)?;
-        }
-
-        if capture {
-            if let Some(rd) = rd.as_mut() {
-                log::info!("End Capture");
-                rd.end_frame_capture(std::ptr::null(), std::ptr::null());
+            if capture {
+                if let Some(rd) = rd.as_mut() {
+                    log::info!("Start Capture");
+                    rd.start_frame_capture(std::ptr::null(), std::ptr::null());
+                }
             }
-            capture = false;
-        }
+            // First convert YUYV to RGB
+            let future = converter.yuyv_buffer_to_vulkan_image(
+                frame,
+                vulkano::sync::now(device.clone()),
+                queue.clone(),
+                &buffer,
+                textures[0].clone(),
+            )?;
 
-        // Submit the texture
-        overlay.set_texture(
-            CAMERA_SIZE * 2,
-            CAMERA_SIZE,
-            output,
-            device.clone(),
-            queue.clone(),
-            instance.clone(),
-        )?;
+            match cfg.overlay.position {
+                config::PositionMode::Absolute { .. } => (),
+                config::PositionMode::Hmd { distance } => {
+                    // We only move the overlay when we get new camera frame
+                    // this way the overlay should be reprojected correctly in-between
+                    overlay_transform = hmd_transform
+                        * matrix![
+                            1.0, 0.0, 0.0, 0.0;
+                            0.0, 1.0, 0.0, 0.0;
+                            0.0, 0.0, 1.0, -distance as f64;
+                            0.0, 0.0, 0.0, 1.0;
+                        ];
+                    unsafe {
+                        vroverlay.pin_mut().SetOverlayTransformAbsolute(
+                            overlay.as_raw(),
+                            openvr_sys::ETrackingUniverseOrigin::TrackingUniverseStanding,
+                            &(&overlay_transform).into(),
+                        )
+                    };
+                }
+            };
+
+            // TODO combine correction and projection
+            if let Some(projector) = projector.as_ref() {
+                // Then do lens correction
+                let future = correction.correct(future, queue.clone(), textures[1].clone())?;
+                // Finally apply projection
+                // Calculate each eye's Model View Project matrix at the moment the current frame is taken
+                let (l, r) = projector.calculate_mvp(
+                    &overlay_transform,
+                    &lhcfg,
+                    (&fov_left, &fov_right),
+                    &vrsys,
+                    &hmd_transform,
+                );
+                let future = projector.project(
+                    future,
+                    queue.clone(),
+                    output.clone(),
+                    1.0,
+                    ipd,
+                    &lhcfg,
+                    (&l, &r),
+                )?;
+
+                // Wait for work to complete
+                future.then_signal_fence().wait(None)?;
+            } else {
+                // Lens correction
+                let future = correction.correct(future, queue.clone(), output.clone())?;
+                future.then_signal_fence().wait(None)?;
+            }
+
+            if capture {
+                if let Some(rd) = rd.as_mut() {
+                    log::info!("End Capture");
+                    rd.end_frame_capture(std::ptr::null(), std::ptr::null());
+                }
+                capture = false;
+            }
+
+            // Submit the texture
+            overlay.set_texture(
+                CAMERA_SIZE * 2,
+                CAMERA_SIZE,
+                output,
+                device.clone(),
+                queue.clone(),
+                instance.clone(),
+            )?;
+        }
 
         let mut event = std::mem::MaybeUninit::<openvr_sys::VREvent_t>::uninit();
         // Handle OpenVR events
