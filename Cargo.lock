@@ -34,9 +34,9 @@ dependencies = [
 
 [[package]]
 name = "anyhow"
-version = "1.0.45"
+version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee10e43ae4a853c0a3591d4e2ada1719e553be18199d9da9d4a83f5927c2f5c7"
+checksum = "38d9ff5d688f1c13395289f67db01d4826b46dd694e7580accdc3e8430f2d98e"
 
 [[package]]
 name = "approx"
@@ -123,12 +123,12 @@ checksum = "cdb031dd78e28731d87d56cc8ffef4a8f36ca26c38fe2de700543e627f8a464a"
 
 [[package]]
 name = "autocxx"
-version = "0.13.0"
+version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6caa9c504b4d63645ed627bf6fbd5b438bf4dad0a56c4f2821b7b6a23aa5edd5"
+checksum = "4fb0a3bed52273bd0d1ab64dd44ee9893d75cdc52e4c689c28c9e5b36fe0f71a"
 dependencies = [
  "aquamarine",
- "autocxx-engine 0.13.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "autocxx-engine 0.13.1",
  "autocxx-macro",
  "cxx",
 ]
@@ -191,13 +191,13 @@ dependencies = [
 
 [[package]]
 name = "autocxx-engine"
-version = "0.13.0"
+version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26044956d6a09ed17935ce548cff2507e6c2108d71d7e71f09d51ad1c52e227c"
+checksum = "4b13ff95207600cecb069c837e562be5755888b501b61e732cdb4f1b07e83014"
 dependencies = [
  "aquamarine",
  "autocxx-bindgen",
- "autocxx-parser 0.13.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "autocxx-parser 0.13.1",
  "cxx",
  "cxx-gen",
  "indoc",
@@ -215,11 +215,11 @@ dependencies = [
 
 [[package]]
 name = "autocxx-macro"
-version = "0.13.0"
+version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "78c20498be18a77ed25cec240c4fa9f68ffa51f471f2b2896e9f435a3776e9cc"
+checksum = "252b48cf29a9ca50d9d250327154b76148b11a706cd763388f01fccd3e5db74f"
 dependencies = [
- "autocxx-parser 0.13.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "autocxx-parser 0.13.1",
  "proc-macro-error",
  "proc-macro2",
  "quote",
@@ -238,9 +238,9 @@ dependencies = [
 
 [[package]]
 name = "autocxx-parser"
-version = "0.13.0"
+version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "802bdee1d6249454c4552d8ba6d29dec0c4c24b8951892de6dd750ac6a00808c"
+checksum = "f27a80e59557a6138c3e18e607f3ed4a416f7eafff69c2f433c73af8ecd33b48"
 dependencies = [
  "log",
  "proc-macro2",
@@ -291,9 +291,9 @@ checksum = "14c189c53d098945499cdfa7ecc63567cf3886b3332b312a5b4585d8d3a6a610"
 
 [[package]]
 name = "cc"
-version = "1.0.71"
+version = "1.0.72"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "79c2681d6594606957bbb8631c4b90a7fcaaa72cdb714743a437b156d6a7eedd"
+checksum = "22a9137b95ea06864e018375b72adfb7db6e6f68cfc8df5a04d00288050485ee"
 
 [[package]]
 name = "cexpr"
@@ -532,12 +532,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dyn-clone"
-version = "1.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee2626afccd7561a06cf1367e2950c4718ea04565e20fb5029b6c7d8ad09abcf"
-
-[[package]]
 name = "either"
 version = "1.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -693,7 +687,6 @@ dependencies = [
  "nalgebra",
  "openvr_sys",
  "renderdoc",
- "schemars",
  "serde 1.0.130",
  "serde_json",
  "shaderc",
@@ -794,15 +787,15 @@ dependencies = [
 
 [[package]]
 name = "libc"
-version = "0.2.106"
+version = "0.2.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a60553f9a9e039a333b4e9b20573b9e9b9c0bb3a11e201ccc48ef4283456d673"
+checksum = "fbe5e23404da5b4f555ef85ebed98fb4083e55a00c317800bc2a50ede9f3d219"
 
 [[package]]
 name = "libloading"
-version = "0.7.1"
+version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c0cf036d15402bea3c5d4de17b3fce76b3e4a56ebc1f577be0e7a72f7c607cf0"
+checksum = "afe203d669ec979b7128619bae5a63b7b42e9203c1b29146079ee05e2f604b52"
 dependencies = [
  "cfg-if",
  "winapi",
@@ -820,9 +813,9 @@ dependencies = [
 
 [[package]]
 name = "link-cplusplus"
-version = "1.0.5"
+version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f1becd27d473556dc610b8afa1636ef90747b574a84553bc11e82371d5ef2d1"
+checksum = "f8cae2cd7ba2f3f63938b9c724475dfb7b9861b545a90324476324ed21dbc8c8"
 dependencies = [
  "cc",
 ]
@@ -1353,30 +1346,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "schemars"
-version = "0.8.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7a48d098c2a7fdf5740b19deb1181b4fb8a9e68e03ae517c14cde04b5725409"
-dependencies = [
- "dyn-clone",
- "schemars_derive",
- "serde 1.0.130",
- "serde_json",
-]
-
-[[package]]
-name = "schemars_derive"
-version = "0.8.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4a9ea2a613fe4cd7118b2bb101a25d8ae6192e1975179b67b2f17afd11e70ac8"
-dependencies = [
- "proc-macro2",
- "quote",
- "serde_derive_internals",
- "syn",
-]
-
-[[package]]
 name = "scoped_threadpool"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1427,21 +1396,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "serde_derive_internals"
-version = "0.25.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1dbab34ca63057a1f15280bdf3c39f2b1eb1b54c17e98360e511637aef7418c6"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
 name = "serde_json"
-version = "1.0.70"
+version = "1.0.71"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e277c495ac6cd1a01a58d0a0c574568b4d1ddf14f59965c6a58b8d96400b54f3"
+checksum = "063bf466a64011ac24040a49009724ee60a57da1b437617ceb32e53ad61bfb19"
 dependencies = [
  "itoa",
  "ryu",
