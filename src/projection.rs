@@ -101,13 +101,13 @@ impl Projection {
         // Camera space to HMD space transform, based on physical measurements
         let left_cam: Matrix4<_> = matrix![
             1.0, 0.0, 0.0, -camera_calib.left.extrinsics.position[0];
-            0.0, 1.0, 0.0, camera_calib.left.extrinsics.position[1];
+            0.0, 1.0, 0.0, -camera_calib.left.extrinsics.position[1];
             0.0, 0.0, 1.0, -camera_calib.left.extrinsics.position[2];
             0.0, 0.0, 0.0, 1.0;
         ];
         let right_cam: Matrix4<_> = matrix![
             1.0, 0.0, 0.0, -camera_calib.right.extrinsics.position[0];
-            0.0, 1.0, 0.0, camera_calib.right.extrinsics.position[1];
+            0.0, 1.0, 0.0, -camera_calib.right.extrinsics.position[1];
             0.0, 0.0, 1.0, -camera_calib.right.extrinsics.position[2];
             0.0, 0.0, 0.0, 1.0;
         ];
