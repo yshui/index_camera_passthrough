@@ -1,9 +1,9 @@
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 /// Because your eye and the camera is at different physical locations, it is impossible
 /// to project camera view into VR space perfectly. There are trade offs approximating
 /// this projection. (viewing range means things too close to you will give you double vision).
-#[derive(Eq, PartialEq, Debug, Serialize, Deserialize)]
+#[derive(Eq, PartialEq, Debug, Serialize, Deserialize, Clone, Copy)]
 pub enum ProjectionMode {
     /// in this mode, we assume your eyes are at the cameras' physical location. this mode
     /// has larger viewing range, but everything will smaller to you.
@@ -18,7 +18,9 @@ impl Default for ProjectionMode {
         Self::FromCamera
     }
 }
-pub const fn default_overlay_distance() -> f32 { 1.0 }
+pub const fn default_overlay_distance() -> f32 {
+    1.0
+}
 #[derive(PartialEq, Debug, Serialize, Deserialize)]
 #[serde(tag = "mode")]
 pub enum PositionMode {
@@ -31,8 +33,8 @@ pub enum PositionMode {
     /// the overlay is at a fixed location in space
     Absolute {
         /// transformation matrix for the overlay
-        transform: [[f32; 4]; 4]
-    }
+        transform: [[f32; 4]; 4],
+    },
 }
 
 impl Default for PositionMode {
@@ -43,11 +45,13 @@ impl Default for PositionMode {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Eye {
-    Left, 
+    Left,
     Right,
 }
 
-pub const fn default_display_eye() -> Eye { Eye::Left }
+pub const fn default_display_eye() -> Eye {
+    Eye::Left
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "mode")]
@@ -64,8 +68,8 @@ pub enum DisplayMode {
     Flat {
         /// which camera's image to display
         #[serde(default = "default_display_eye")]
-        eye: Eye
-    }
+        eye: Eye,
+    },
 }
 
 impl Default for DisplayMode {
@@ -79,7 +83,6 @@ pub struct OverlayConfig {
     /// how is the overlay positioned
     #[serde(default)]
     pub position: PositionMode,
-
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy)]

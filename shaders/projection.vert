@@ -3,12 +3,12 @@ layout(location = 0) in vec2 position;
 layout(binding = 0) uniform Transform {
 	mat4 mvp;
 	float overlayWidth;
-	float eyeOffset;
+	vec2 eyeOffset;
 };
 layout(location = 1) out vec3 texCoord;
 
 void main() {
-	vec2 pos = vec2(position.x + eyeOffset, position.y) * overlayWidth / 2.0;
+	vec2 pos = (position + eyeOffset) * overlayWidth / 2.0;
 	// Change coordinate system: mvp is y up, position is y down
 	pos.y = -pos.y;
 

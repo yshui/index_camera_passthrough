@@ -1,4 +1,4 @@
-#![feature(untagged_unions)]
+use std::mem::ManuallyDrop;
 autocxx::include_cpp! {
     #include "/usr/include/openvr/openvr.h"
     generate!("vr::IVRSystem")
@@ -51,35 +51,35 @@ autocxx::include_cpp! {
 #[allow(non_camel_case_types, non_snake_case)]
 #[repr(C)]
 pub union VREvent_Data_t {
-    pub reserved: ffi::vr::VREvent_Reserved_t,
-    pub controller: ffi::vr::VREvent_Controller_t,
-    pub mouse: ffi::vr::VREvent_Mouse_t,
-    pub scroll: ffi::vr::VREvent_Scroll_t,
-    pub process: ffi::vr::VREvent_Process_t,
-    pub notification: ffi::vr::VREvent_Notification_t,
-    pub overlay: ffi::vr::VREvent_Overlay_t,
-    pub status: ffi::vr::VREvent_Status_t,
-    pub keyboard: ffi::vr::VREvent_Keyboard_t,
-    pub ipd: ffi::vr::VREvent_Ipd_t,
-    pub chaperone: ffi::vr::VREvent_Chaperone_t,
-    pub performanceTest: ffi::vr::VREvent_PerformanceTest_t,
-    pub touchPadMove: ffi::vr::VREvent_TouchPadMove_t,
-    pub seatedZeroPoseReset: ffi::vr::VREvent_SeatedZeroPoseReset_t,
-    pub screenshot: ffi::vr::VREvent_Screenshot_t,
-    pub screenshotProgress: ffi::vr::VREvent_ScreenshotProgress_t,
-    pub applicationLaunch: ffi::vr::VREvent_ApplicationLaunch_t,
-    pub cameraSurface: ffi::vr::VREvent_EditingCameraSurface_t,
-    pub messageOverlay: ffi::vr::VREvent_MessageOverlay_t,
-    pub property: ffi::vr::VREvent_Property_t,
-    pub hapticVibration: ffi::vr::VREvent_HapticVibration_t,
-    pub webConsole: ffi::vr::VREvent_WebConsole_t,
-    pub inputBinding: ffi::vr::VREvent_InputBindingLoad_t,
-    pub actionManifest: ffi::vr::VREvent_InputActionManifestLoad_t,
-    pub spatialAnchor: ffi::vr::VREvent_SpatialAnchor_t,
-    pub progressUpdate: ffi::vr::VREvent_ProgressUpdate_t,
-    pub showUi: ffi::vr::VREvent_ShowUI_t,
-    pub showDevTools: ffi::vr::VREvent_ShowDevTools_t,
-    pub hdcpError: ffi::vr::VREvent_HDCPError_t,
+    pub reserved: ManuallyDrop<ffi::vr::VREvent_Reserved_t>,
+    pub controller: ManuallyDrop<ffi::vr::VREvent_Controller_t>,
+    pub mouse: ManuallyDrop<ffi::vr::VREvent_Mouse_t>,
+    pub scroll: ManuallyDrop<ffi::vr::VREvent_Scroll_t>,
+    pub process: ManuallyDrop<ffi::vr::VREvent_Process_t>,
+    pub notification: ManuallyDrop<ffi::vr::VREvent_Notification_t>,
+    pub overlay: ManuallyDrop<ffi::vr::VREvent_Overlay_t>,
+    pub status: ManuallyDrop<ffi::vr::VREvent_Status_t>,
+    pub keyboard: ManuallyDrop<ffi::vr::VREvent_Keyboard_t>,
+    pub ipd: ManuallyDrop<ffi::vr::VREvent_Ipd_t>,
+    pub chaperone: ManuallyDrop<ffi::vr::VREvent_Chaperone_t>,
+    pub performanceTest: ManuallyDrop<ffi::vr::VREvent_PerformanceTest_t>,
+    pub touchPadMove: ManuallyDrop<ffi::vr::VREvent_TouchPadMove_t>,
+    pub seatedZeroPoseReset: ManuallyDrop<ffi::vr::VREvent_SeatedZeroPoseReset_t>,
+    pub screenshot: ManuallyDrop<ffi::vr::VREvent_Screenshot_t>,
+    pub screenshotProgress: ManuallyDrop<ffi::vr::VREvent_ScreenshotProgress_t>,
+    pub applicationLaunch: ManuallyDrop<ffi::vr::VREvent_ApplicationLaunch_t>,
+    pub cameraSurface: ManuallyDrop<ffi::vr::VREvent_EditingCameraSurface_t>,
+    pub messageOverlay: ManuallyDrop<ffi::vr::VREvent_MessageOverlay_t>,
+    pub property: ManuallyDrop<ffi::vr::VREvent_Property_t>,
+    pub hapticVibration: ManuallyDrop<ffi::vr::VREvent_HapticVibration_t>,
+    pub webConsole: ManuallyDrop<ffi::vr::VREvent_WebConsole_t>,
+    pub inputBinding: ManuallyDrop<ffi::vr::VREvent_InputBindingLoad_t>,
+    pub actionManifest: ManuallyDrop<ffi::vr::VREvent_InputActionManifestLoad_t>,
+    pub spatialAnchor: ManuallyDrop<ffi::vr::VREvent_SpatialAnchor_t>,
+    pub progressUpdate: ManuallyDrop<ffi::vr::VREvent_ProgressUpdate_t>,
+    pub showUi: ManuallyDrop<ffi::vr::VREvent_ShowUI_t>,
+    pub showDevTools: ManuallyDrop<ffi::vr::VREvent_ShowDevTools_t>,
+    pub hdcpError: ManuallyDrop<ffi::vr::VREvent_HDCPError_t>,
 }
 #[allow(non_camel_case_types, non_snake_case)]
 #[repr(C, packed(4))]
@@ -103,6 +103,38 @@ impl EVROverlayError {
     }
 }
 
+impl std::fmt::Debug for EVROverlayError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::VROverlayError_None => write!(f, "VROverlayError_None"),
+            Self::VROverlayError_UnknownOverlay => write!(f, "VROverlayError_UnknownOverlay"),
+            Self::VROverlayError_InvalidHandle => write!(f, "VROverlayError_InvalidHandle"),
+            Self::VROverlayError_PermissionDenied => write!(f, "VROverlayError_PermissionDenied"),
+            Self::VROverlayError_OverlayLimitExceeded => write!(f, "VROverlayError_OverlayLimitExceeded"),
+            Self::VROverlayError_WrongVisibilityType => write!(f, "VROverlayError_WrongVisibilityType"),
+            Self::VROverlayError_KeyTooLong => write!(f, "VROverlayError_KeyTooLong"),
+            Self::VROverlayError_NameTooLong => write!(f, "VROverlayError_NameTooLong"),
+            Self::VROverlayError_KeyInUse => write!(f, "VROverlayError_KeyInUse"),
+            Self::VROverlayError_WrongTransformType => write!(f, "VROverlayError_WrongTransformType"),
+            Self::VROverlayError_InvalidTrackedDevice => write!(f, "VROverlayError_InvalidTrackedDevice"),
+            Self::VROverlayError_InvalidParameter => write!(f, "VROverlayError_InvalidParameter"),
+            Self::VROverlayError_ThumbnailCantBeDestroyed => write!(f, "VROverlayError_ThumbnailCantBeDestroyed"),
+            Self::VROverlayError_ArrayTooSmall => write!(f, "VROverlayError_ArrayTooSmall"),
+            Self::VROverlayError_RequestFailed => write!(f, "VROverlayError_RequestFailed"),
+            Self::VROverlayError_InvalidTexture => write!(f, "VROverlayError_InvalidTexture"),
+            Self::VROverlayError_UnableToLoadFile => write!(f, "VROverlayError_UnableToLoadFile"),
+            Self::VROverlayError_KeyboardAlreadyInUse => write!(f, "VROverlayError_KeyboardAlreadyInUse"),
+            Self::VROverlayError_NoNeighbor => write!(f, "VROverlayError_NoNeighbor"),
+            Self::VROverlayError_TooManyMaskPrimitives => write!(f, "VROverlayError_TooManyMaskPrimitives"),
+            Self::VROverlayError_BadMaskPrimitive => write!(f, "VROverlayError_BadMaskPrimitive"),
+            Self::VROverlayError_TextureAlreadyLocked => write!(f, "VROverlayError_TextureAlreadyLocked"),
+            Self::VROverlayError_TextureLockCapacityReached => write!(f, "VROverlayError_TextureLockCapacityReached"),
+            Self::VROverlayError_TextureNotLocked => write!(f, "VROverlayError_TextureNotLocked"),
+            Self::VROverlayError_TimedOut => write!(f, "VROverlayError_TimedOut"),
+        }
+    }
+}
+
 impl std::fmt::Display for EVROverlayError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         <Self as std::fmt::Debug>::fmt(self, f)
@@ -113,12 +145,44 @@ impl std::error::Error for EVROverlayError {
 
 }
 
+impl std::fmt::Debug for ETrackedPropertyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use ETrackedPropertyError::*;
+        match self {
+            TrackedProp_Success => write!(f, "TrackedProp_Success"),
+            TrackedProp_WrongDataType => write!(f, "TrackedProp_WrongDataType"),
+            TrackedProp_WrongDeviceClass => write!(f, "TrackedProp_WrongDeviceClass"),
+            TrackedProp_BufferTooSmall => write!(f, "TrackedProp_BufferTooSmall"),
+            TrackedProp_UnknownProperty => write!(f, "TrackedProp_UnknownProperty"),
+            TrackedProp_InvalidDevice => write!(f, "TrackedProp_InvalidDevice"),
+            TrackedProp_CouldNotContactServer => write!(f, "TrackedProp_CouldNotContactServer"),
+            TrackedProp_ValueNotProvidedByDevice => write!(f, "TrackedProp_ValueNotProvidedByDevice"),
+            TrackedProp_StringExceedsMaximumLength => write!(f, "TrackedProp_StringExceedsMaximumLength"),
+            TrackedProp_NotYetAvailable => write!(f, "TrackedProp_NotYetAvailable"),
+            TrackedProp_PermissionDenied => write!(f, "TrackedProp_PermissionDenied"),
+            TrackedProp_InvalidOperation => write!(f, "TrackedProp_InvalidOperation"),
+            TrackedProp_CannotWriteToWildcards => write!(f, "TrackedProp_CannotWriteToWildcards"),
+            TrackedProp_IPCReadFailure => write!(f, "TrackedProp_IPCReadFailure"),
+            TrackedProp_OutOfMemory => write!(f, "TrackedProp_OutOfMemory"),
+            TrackedProp_InvalidContainer => write!(f, "TrackedProp_InvalidContainer"),
+        }
+    }
+}
+
 impl EVRInitError {
     pub fn into_result(self) -> Result<(), Self> {
         if self == EVRInitError::VRInitError_None {
             Ok(())
         } else {
             Err(self)
+        }
+    }
+}
+
+impl std::fmt::Debug for EVRInitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            _ => write!(f, "VRInitError_Unknown")
         }
     }
 }
@@ -133,7 +197,7 @@ impl std::error::Error for EVRInitError {
 
 }
 
-impl<T: num::NumCast + num::Float + num::Zero + num::One + nalgebra::Scalar> Into<nalgebra::Matrix4<T>> for HmdMatrix34_t {
+impl<T: num::NumCast + num::Float + num::Zero + num::One + nalgebra::Scalar> Into<nalgebra::Matrix4<T>> for &'_ HmdMatrix34_t {
     fn into(self) -> nalgebra::Matrix4<T> {
         // Note: [[float; 4]; 4] -> Matrix is column major
         let mut tmp = [[T::nan(); 4]; 4];
@@ -150,9 +214,15 @@ impl<T: num::NumCast + num::Float + num::Zero + num::One + nalgebra::Scalar> Int
     }
 }
 
+impl<T: num::NumCast + num::Float + num::Zero + num::One + nalgebra::Scalar> Into<nalgebra::Matrix4<T>> for HmdMatrix34_t {
+    fn into(self) -> nalgebra::Matrix4<T> {
+        (&self).into()
+    }
+}
+
 impl<T: num::ToPrimitive> From<&'_ nalgebra::Matrix4<T>> for HmdMatrix34_t {
     fn from(m: &nalgebra::Matrix4<T>) -> Self {
-        let mut ret = unsafe { std::mem::MaybeUninit::<Self>::uninit().assume_init() };
+        let mut ret = unsafe { std::mem::MaybeUninit::<Self>::zeroed().assume_init() };
         for i in 0..3 {
             for j in 0..4 {
                 ret.m[i][j] = m[(i,j)].to_f32().unwrap();

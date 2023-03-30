@@ -1,17 +1,17 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Clone, Copy)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
 pub struct Extrinsics {
     /// Offset of the camera from Hmd
     pub position: [f64; 3],
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
 pub struct Distort {
     pub coeffs: [f64; 4],
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
 pub struct Intrinsics {
     /// Optical center X
     pub center_x: f64,
@@ -24,21 +24,21 @@ pub struct Intrinsics {
     pub distort: Distort,
 }
 
-#[derive(Serialize, Deserialize, Eq, PartialEq, Clone, Copy)]
+#[derive(Serialize, Deserialize, Eq, PartialEq, Clone, Copy, Debug)]
 #[serde(rename_all = "lowercase")]
 pub enum Camera {
     Left,
     Right,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
 pub struct TrackedCamera {
     pub extrinsics: Extrinsics,
     pub intrinsics: Intrinsics,
     pub name: Camera,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
 pub struct StereoCamera {
     pub left: TrackedCamera,
     pub right: TrackedCamera,

@@ -7,7 +7,7 @@ use vulkano::{
     device::{physical::PhysicalDevice, Device, Queue},
     image::ImageAccess,
     instance::Instance,
-    Handle, SynchronizedVulkanObject, VulkanObject,
+    Handle, VulkanObject,
 };
 
 pub struct VRSystem(*mut openvr_sys::IVRSystem, Cell<Option<Arc<Device>>>);
@@ -22,12 +22,12 @@ impl<'a> VRCompositor<'a> {
     }
     pub fn required_extensions<'b>(
         &self,
-        pdev: PhysicalDevice,
+        pdev: &PhysicalDevice,
         buf: &'b mut Vec<u8>,
     ) -> impl Iterator<Item = &'b std::ffi::CStr> {
         let bytes_needed = unsafe {
             self.pin_mut().GetVulkanDeviceExtensionsRequired(
-                std::mem::transmute(pdev.internal_object().as_raw()),
+                std::mem::transmute(pdev.handle().as_raw()),
                 std::ptr::null_mut(),
                 0,
             )
@@ -35,7 +35,7 @@ impl<'a> VRCompositor<'a> {
         buf.reserve(bytes_needed as usize);
         unsafe {
             self.pin_mut().GetVulkanDeviceExtensionsRequired(
-                std::mem::transmute(pdev.internal_object().as_raw()),
+                std::mem::transmute(pdev.handle().as_raw()),
                 buf.as_mut_ptr() as *mut _,
                 bytes_needed,
             );
@@ -80,7 +80,9 @@ impl VRSystem {
     #[allow(dead_code)]
     pub fn find_hmd(&self) -> Option<u32> {
         for i in 0..64 {
-            if self.pin_mut().GetTrackedDeviceClass(i) == openvr_sys::ETrackedDeviceClass::TrackedDeviceClass_HMD {
+            if self.pin_mut().GetTrackedDeviceClass(i)
+                == openvr_sys::ETrackedDeviceClass::TrackedDeviceClass_HMD
+            {
                 return Some(i);
             }
         }
@@ -95,7 +97,7 @@ impl VRSystem {
                 hmd_transform.as_mut_ptr(),
                 1,
             );
-            hmd_transform.assume_init().mDeviceToAbsoluteTracking.into()
+            (&hmd_transform.assume_init().mDeviceToAbsoluteTracking).into()
         }
     }
     pub fn pin_mut(&self) -> Pin<&mut openvr_sys::IVRSystem> {
@@ -181,14 +183,14 @@ impl<'a> VROverlayHandle<'a> {
             m_nHeight: h,
             m_nFormat: image.format() as u32,
             m_nSampleCount: image.samples() as u32,
-            m_nImage: image.inner().image.internal_object().as_raw(),
+            m_nImage: image.inner().image.handle().as_raw(),
             m_pPhysicalDevice: unsafe {
-                std::mem::transmute(dev.physical_device().internal_object().as_raw())
+                std::mem::transmute(dev.physical_device().handle().as_raw())
             },
-            m_pDevice: unsafe { std::mem::transmute(dev.internal_object().as_raw()) },
-            m_pQueue: unsafe { std::mem::transmute(queue.internal_object_guard().as_raw()) },
-            m_pInstance: unsafe { std::mem::transmute(instance.internal_object().as_raw()) },
-            m_nQueueFamilyIndex: queue.family().id(),
+            m_pDevice: unsafe { std::mem::transmute(dev.handle().as_raw()) },
+            m_pQueue: unsafe { std::mem::transmute(queue.handle().as_raw()) },
+            m_pInstance: unsafe { std::mem::transmute(instance.handle().as_raw()) },
+            m_nQueueFamilyIndex: queue.queue_family_index(),
         };
         let vrtexture = openvr_sys::Texture_t {
             handle: &mut vrimage as *mut _ as *mut std::ffi::c_void,

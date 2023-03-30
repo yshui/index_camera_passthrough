@@ -1,18 +1,29 @@
 use anyhow::{anyhow, Result};
 use std::sync::Arc;
 use vulkano::{
-    buffer::{BufferUsage, CpuAccessibleBuffer, CpuBufferPool, TypedBufferAccess},
-    command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage::OneTimeSubmit},
-    command_buffer::{CopyBufferImageError, SubpassContents},
-    descriptor_set::{persistent::PersistentDescriptorSet, DescriptorSetError},
-    device::{Device, Queue},
-    format::Format::R8G8B8A8_UNORM,
-    image::view::ImageView,
-    image::{view::ImageViewCreationError, AttachmentImage, ImageCreationError, ImageUsage},
-    pipeline::{
-        viewport::Viewport, GraphicsPipeline, GraphicsPipelineCreationError, PipelineBindPoint,
+    buffer::{BufferUsage, CpuAccessibleBuffer, TypedBufferAccess},
+    command_buffer::SubpassContents,
+    command_buffer::{
+        allocator::StandardCommandBufferAllocator, AutoCommandBufferBuilder,
+        CommandBufferUsage::OneTimeSubmit, CopyBufferToImageInfo, RenderPassBeginInfo,
     },
-    render_pass::{Framebuffer, FramebufferCreationError, RenderPass, Subpass},
+    descriptor_set::{
+        allocator::StandardDescriptorSetAllocator, persistent::PersistentDescriptorSet,
+        WriteDescriptorSet,
+    },
+    device::{Device, DeviceOwned, Queue},
+    format::Format::R8G8B8A8_UNORM,
+    image::view::{ImageView, ImageViewCreateInfo},
+    image::{view::ImageViewCreationError, AttachmentImage, ImageUsage},
+    memory::allocator::{FastMemoryAllocator, StandardMemoryAllocator},
+    pipeline::{
+        graphics::{viewport::Viewport, GraphicsPipelineCreationError},
+        GraphicsPipeline, Pipeline, PipelineBindPoint,
+    },
+    render_pass::{
+        Framebuffer, FramebufferCreateInfo, FramebufferCreationError, RenderPass, Subpass,
+    },
+    sampler::{Filter, Sampler, SamplerCreateInfo},
     sync::GpuFuture,
     OomError,
 };
@@ -36,7 +47,8 @@ mod fs {
     }
 }
 
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(C)]
 struct Vertex {
     position: [f32; 2],
 }
@@ -50,14 +62,14 @@ pub enum ConverterError {
     VkOom(#[from] OomError),
     #[error("{0}")]
     GraphicsPipelineCreationError(#[from] GraphicsPipelineCreationError),
-    #[error("{0}")]
-    ImageCreationError(#[from] ImageCreationError),
+    //#[error("{0}")]
+    //ImageCreationError(#[from] ImageCreationError),
     #[error("{0}")]
     ImageViewCreationError(#[from] ImageViewCreationError),
-    #[error("{0}")]
-    DescriptorSetError(#[from] DescriptorSetError),
-    #[error("{0}")]
-    CopyBufferImageError(#[from] CopyBufferImageError),
+    //#[error("{0}")]
+    //DescriptorSetError(#[from] DescriptorSetError),
+    //#[error("{0}")]
+    //CopyBufferImageError(#[from] CopyBufferImageError),
     #[error("{0}")]
     FramebufferCreationError(#[from] FramebufferCreationError),
 }
@@ -74,76 +86,73 @@ pub struct GpuYuyvConverter {
 /// know if it's widely supported. And the image format we need (G8B8G8R8_422_UNORM)
 /// seems to have even less support than the extension itself.
 impl GpuYuyvConverter {
-    pub fn new(device: Arc<Device>, w: u32, h: u32) -> Result<Self> {
+    pub fn new(
+        device: Arc<Device>,
+        allocator: &StandardMemoryAllocator,
+        descriptor_set_allocator: &StandardDescriptorSetAllocator,
+        w: u32,
+        h: u32,
+    ) -> Result<Self> {
         if w % 2 != 0 {
             return Err(anyhow!("Width can't be odd"));
         }
-        let vs = vs::Shader::load(device.clone())?;
-        let fs = fs::Shader::load(device.clone())?;
-        let render_pass = Arc::new(
-            vulkano::single_pass_renderpass!(device.clone(),
-                attachments: {
-                    color: {
-                        load: DontCare,
-                        store: Store,
-                        format: vulkano::format::Format::R8G8B8A8_UNORM,
-                        samples: 1,
-                    }
-                },
-                pass: {
-                    color: [color],
-                    depth_stencil: {}
+        let vs = vs::load(device.clone())?;
+        let fs = fs::load(device.clone())?;
+        let render_pass = vulkano::single_pass_renderpass!(device.clone(),
+            attachments: {
+                color: {
+                    load: DontCare,
+                    store: Store,
+                    format: vulkano::format::Format::R8G8B8A8_UNORM,
+                    samples: 1,
                 }
-            )
-            .unwrap(),
-        );
-        let pipeline = Arc::new(
-            GraphicsPipeline::start()
-                .vertex_input_single_buffer::<Vertex>()
-                .vertex_shader(vs.main_entry_point(), ())
-                .triangle_strip()
-                .viewports([Viewport {
-                    origin: [0.0, 0.0],
-                    dimensions: [w as f32, h as f32],
-                    depth_range: -1.0..1.0,
-                }])
-                .fragment_shader(fs.main_entry_point(), ())
-                .render_pass(Subpass::from(render_pass.clone(), 0).unwrap())
-                .build(device.clone())?,
-        );
+            },
+            pass: {
+                color: [color],
+                depth_stencil: {}
+            }
+        )?;
+        let pipeline = GraphicsPipeline::start()
+            .vertex_input_single_buffer::<Vertex>()
+            .vertex_shader(vs.entry_point("main").unwrap(), ())
+            .triangle_strip()
+            .viewports([Viewport {
+                origin: [0.0, 0.0],
+                dimensions: [w as f32, h as f32],
+                depth_range: -1.0..1.0,
+            }])
+            .fragment_shader(fs.entry_point("main").unwrap(), ())
+            .render_pass(Subpass::from(render_pass.clone(), 0).unwrap())
+            .build(device.clone())?;
         let src = AttachmentImage::with_usage(
-            device.clone(),
+            allocator,
             [w / 2, h], // 1 pixel of YUYV = 2 pixels of RGB
             R8G8B8A8_UNORM,
             ImageUsage {
-                transfer_source: false,
-                transfer_destination: true,
+                transfer_dst: true,
                 sampled: true,
-                storage: false,
                 color_attachment: true,
-                depth_stencil_attachment: false,
-                transient_attachment: false,
-                input_attachment: false,
+                ..ImageUsage::empty()
             },
         )?;
-        let desc_set_layout = pipeline.layout().descriptor_set_layouts().get(0).unwrap();
-        let mut desc_set_builder = PersistentDescriptorSet::start(desc_set_layout.clone());
-        use vulkano::sampler::{Filter, MipmapMode, Sampler, SamplerAddressMode};
         let sampler = Sampler::new(
             device.clone(),
-            Filter::Linear,
-            Filter::Linear,
-            MipmapMode::Nearest,
-            SamplerAddressMode::ClampToEdge,
-            SamplerAddressMode::ClampToEdge,
-            SamplerAddressMode::ClampToEdge,
-            0.0,
-            1.0,
-            0.0,
-            0.0,
+            SamplerCreateInfo {
+                min_filter: Filter::Linear,
+                mag_filter: Filter::Linear,
+                ..Default::default()
+            },
         )?;
-        desc_set_builder.add_sampled_image(ImageView::new(src.clone())?, sampler)?;
-        let desc_set = Arc::new(desc_set_builder.build()?);
+        let desc_set_layout = pipeline.layout().set_layouts().get(0).unwrap();
+        let mut desc_set = PersistentDescriptorSet::new(
+            descriptor_set_allocator,
+            desc_set_layout.clone(),
+            [WriteDescriptorSet::image_view_sampler(
+                0,
+                ImageView::new(src.clone(), ImageViewCreateInfo::from_image(&src))?,
+                sampler,
+            )],
+        )?;
         Ok(Self {
             src,
             render_pass,
@@ -160,32 +169,50 @@ impl GpuYuyvConverter {
     /// calling this function again.
     pub fn yuyv_buffer_to_vulkan_image(
         &self,
+        allocator: &FastMemoryAllocator,
+        cmdbuf_allocator: &StandardCommandBufferAllocator,
         buf: &[u8],
         after: impl GpuFuture,
         queue: Arc<Queue>,
-        buffer: &CpuBufferPool<u8>,
         output: Arc<AttachmentImage>,
     ) -> Result<impl GpuFuture> {
-        use vulkano::device::DeviceOwned;
-        if queue.device() != &self.device || buffer.device() != &self.device {
+        if queue.device() != &self.device
+            || allocator.device() != &self.device
+            || cmdbuf_allocator.device() != &self.device
+        {
             return Err(anyhow!("Device mismatch"));
         }
-        if let Some(queue) = after.queue() {
-            if !queue.is_same(&queue) {
+        if let Some(after_queue) = after.queue() {
+            if queue != after_queue {
                 return Err(anyhow!("Queue mismatch"));
             }
         }
         // Submit the source image to GPU
-        let subbuffer = buffer
-            .chunk(buf.iter().copied())
-            .map_err(|e| ConverterError::Anyhow(e.into()))?;
-        let mut cmdbuf =
-            AutoCommandBufferBuilder::primary(self.device.clone(), queue.family(), OneTimeSubmit)?;
-        cmdbuf.copy_buffer_to_image(subbuffer, self.src.clone())?;
+        let subbuffer = unsafe {
+            CpuAccessibleBuffer::uninitialized_array(
+                allocator,
+                buf.len() as u64,
+                BufferUsage::empty(),
+                false,
+            )
+        }?;
+        subbuffer.write()?.copy_from_slice(buf);
+        let mut cmdbuf = AutoCommandBufferBuilder::primary(
+            cmdbuf_allocator,
+            queue.queue_family_index(),
+            OneTimeSubmit,
+        )?;
+        cmdbuf.copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(
+            subbuffer,
+            self.src.clone(),
+        ))?;
         // Build a pipeline to do yuyv -> rgb
         let vertex_buffer = CpuAccessibleBuffer::<[Vertex]>::from_iter(
-            self.device.clone(),
-            BufferUsage::vertex_buffer(),
+            allocator,
+            BufferUsage {
+                vertex_buffer: true,
+                ..BufferUsage::empty()
+            },
             false,
             [
                 Vertex {
@@ -205,17 +232,20 @@ impl GpuYuyvConverter {
             .cloned(),
         )
         .unwrap();
-        let framebuffer = Arc::new(
-            Framebuffer::start(self.render_pass.clone())
-                .add(ImageView::new(output)?)?
-                .build()?,
-        );
+        let framebuffer = Framebuffer::new(
+            self.render_pass.clone(),
+            FramebufferCreateInfo {
+                attachments: vec![ImageView::new(
+                    output.clone(),
+                    ImageViewCreateInfo::from_image(&output),
+                )?],
+                ..Default::default()
+            },
+        )?;
+        let mut render_pass_begin_info = RenderPassBeginInfo::framebuffer(framebuffer);
+        render_pass_begin_info.clear_values = vec![None];
         cmdbuf
-            .begin_render_pass(
-                framebuffer,
-                SubpassContents::Inline,
-                [vulkano::format::ClearValue::None],
-            )
+            .begin_render_pass(render_pass_begin_info, SubpassContents::Inline)
             .map_err(|e| ConverterError::Anyhow(e.into()))?
             .bind_pipeline_graphics(self.pipeline.clone())
             .bind_descriptor_sets(

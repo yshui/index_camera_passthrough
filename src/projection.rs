@@ -12,22 +12,32 @@
 use anyhow::{anyhow, Result};
 use std::sync::Arc;
 use vulkano::{
-    buffer::{BufferUsage, CpuAccessibleBuffer, TypedBufferAccess},
+    buffer::{BufferContents, BufferUsage, CpuAccessibleBuffer, TypedBufferAccess},
     command_buffer::{
-        AutoCommandBufferBuilder, CommandBufferUsage::OneTimeSubmit, SubpassContents,
+        allocator::StandardCommandBufferAllocator, AutoCommandBufferBuilder,
+        CommandBufferUsage::OneTimeSubmit, CopyImageInfo, RenderPassBeginInfo, SubpassContents,
     },
-    descriptor_set::single_layout_pool::SingleLayoutDescSetPool,
+    descriptor_set::{
+        allocator::StandardDescriptorSetAllocator, PersistentDescriptorSet, WriteDescriptorSet,
+    },
     device::{Device, Queue},
-    image::{view::ImageView, AttachmentImage},
-    pipeline::{viewport::Viewport, GraphicsPipeline, PipelineBindPoint},
+    image::{
+        view::{ImageView, ImageViewCreateInfo},
+        AttachmentImage, ImageAccess,
+    },
+    memory::allocator::{AllocationCreationError, FastMemoryAllocator, StandardMemoryAllocator},
+    pipeline::{graphics::viewport::Viewport, GraphicsPipeline, Pipeline, PipelineBindPoint},
     render_pass::{Framebuffer, RenderPass, Subpass},
-    sampler::{Filter, MipmapMode, Sampler, SamplerAddressMode},
+    sampler::{Filter, Sampler, SamplerCreateInfo},
     sync::GpuFuture,
 };
 mod vs {
     vulkano_shaders::shader! {
         ty: "vertex",
         path: "shaders/projection.vert",
+        types_meta: {
+            #[derive(::bytemuck::Zeroable, ::bytemuck::Pod, Copy, Clone, Debug)]
+        },
     }
 }
 
@@ -35,7 +45,30 @@ mod fs {
     vulkano_shaders::shader! {
         ty: "fragment",
         path: "shaders/projection.frag",
+        types_meta: {
+            #[derive(::bytemuck::Zeroable, ::bytemuck::Pod, Copy, Clone, Debug)]
+        },
     }
+}
+
+#[derive(PartialEq)]
+pub struct ProjectionParameters {
+    pub ipd: f32,
+    pub overlay_width: f32,
+    /// MVP matrices for the left and right eye, respectively.
+    pub mvps: [Matrix4<f32>; 2],
+    pub camera_calib: crate::steam::StereoCamera,
+    pub mode: ProjectionMode,
+}
+
+struct UniformData {
+    tex_offsets: [fs::ty::Info; 2],
+    transforms: [vs::ty::Transform; 2],
+}
+
+struct Uniforms {
+    tex_offsets: [Arc<CpuAccessibleBuffer<fs::ty::Info>>; 2],
+    transforms: [Arc<CpuAccessibleBuffer<vs::ty::Transform>>; 2],
 }
 
 pub struct Projection {
@@ -43,10 +76,14 @@ pub struct Projection {
     source: Arc<AttachmentImage>,
     pipeline: Arc<GraphicsPipeline>,
     render_pass: Arc<RenderPass>,
-    mode: ProjectionMode,
+    // [0: left, 1: right]
+    uniforms: Uniforms,
+    saved_parameters: ProjectionParameters,
+    desc_sets: [Arc<PersistentDescriptorSet>; 2],
 }
 use crate::config::ProjectionMode;
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(C)]
 struct Vertex {
     position: [f32; 2],
     in_tex_coord: [f32; 3],
@@ -83,6 +120,7 @@ impl Projection {
     /// time_origin = instant when the first frame is taken
     pub fn calculate_mvp(
         &self,
+        mode: ProjectionMode,
         overlay_transform: &Matrix4<f64>,
         camera_calib: &crate::steam::StereoCamera,
         (fov_left, fov_right): (&[f64; 2], &[f64; 2]),
@@ -112,7 +150,7 @@ impl Projection {
             0.0, 0.0, 0.0, 1.0;
         ];
 
-        let (left_eye, right_eye) = match self.mode {
+        let (left_eye, right_eye) = match mode {
             ProjectionMode::FromEye => (hmd_transform * left_eye, hmd_transform * right_eye),
             ProjectionMode::FromCamera => (hmd_transform * left_cam, hmd_transform * right_cam),
         };
@@ -144,108 +182,194 @@ impl Projection {
             (camera_projection_right * right_view * overlay_transform).cast(),
         )
     }
+    fn update_uniforms(&mut self, params: &ProjectionParameters) -> Result<()> {
+        if &self.saved_parameters == params {
+            return Ok(());
+        }
+        let ProjectionParameters {
+            mode,
+            overlay_width,
+            ipd,
+            mvps,
+            camera_calib,
+        } = params;
+        assert_eq!(camera_calib, &self.saved_parameters.camera_calib);
+        let mut transforms_write = self.uniforms.transforms.each_ref().try_map(|u| u.write())?;
+        if mode != &self.saved_parameters.mode {
+            let eye_offset_left = if *mode == ProjectionMode::FromEye {
+                [
+                    -camera_calib.left.extrinsics.position[0] as f32 - ipd / 2.0,
+                    camera_calib.left.extrinsics.position[1] as f32,
+                ]
+            } else {
+                [0.0, 0.0]
+            };
+            let eye_offset_right = [-eye_offset_left[0], eye_offset_left[1]];
+            transforms_write[0].eyeOffset = eye_offset_left;
+            transforms_write[1].eyeOffset = eye_offset_right;
+            self.saved_parameters.mode = *mode;
+        }
+
+        for ((mvp, saved_mvp), write) in mvps
+            .iter()
+            .zip(self.saved_parameters.mvps.iter_mut())
+            .zip(transforms_write.iter_mut())
+        {
+            if mvp != saved_mvp {
+                *saved_mvp = *mvp;
+                write.mvp = *mvp.as_ref();
+            }
+        }
+
+        if overlay_width != &self.saved_parameters.overlay_width {
+            self.saved_parameters.overlay_width = *overlay_width;
+            transforms_write[0].overlayWidth = *overlay_width;
+            transforms_write[1].overlayWidth = *overlay_width;
+        }
+        Ok(())
+    }
+    fn make_uniform_buffer<T: BufferContents>(
+        allocator: &StandardMemoryAllocator,
+        uniform: T,
+    ) -> Result<Arc<CpuAccessibleBuffer<T>>, AllocationCreationError> {
+        CpuAccessibleBuffer::from_data(
+            allocator,
+            BufferUsage {
+                uniform_buffer: true,
+                ..BufferUsage::empty()
+            },
+            false,
+            uniform,
+        )
+    }
     pub fn new(
         device: Arc<Device>,
+        allocator: &StandardMemoryAllocator,
+        descriptor_set_allocator: &StandardDescriptorSetAllocator,
         source: Arc<AttachmentImage>,
-        mode: ProjectionMode,
+        camera_calib: &crate::steam::StereoCamera,
     ) -> Result<Self> {
-        let [w, h, _] = source.dimensions();
+        let [w, h] = source.dimensions().width_height();
         if w != h * 2 {
             return Err(anyhow!("Input not square"));
         }
-        let vs = vs::Shader::load(device.clone())?;
-        let fs = fs::Shader::load(device.clone())?;
-        let render_pass = Arc::new(
-            vulkano::single_pass_renderpass!(device.clone(),
-                attachments: {
-                    color: {
-                        load: Load,
-                        store: Store,
-                        format: vulkano::format::Format::R8G8B8A8_UNORM,
-                        samples: 1,
-                    }
-                },
-                pass: {
-                    color: [color],
-                    depth_stencil: {}
+        let vs = vs::load(device.clone())?;
+        let fs = fs::load(device.clone())?;
+        let render_pass = vulkano::single_pass_renderpass!(device.clone(),
+            attachments: {
+                color: {
+                    load: Load,
+                    store: Store,
+                    format: vulkano::format::Format::R8G8B8A8_UNORM,
+                    samples: 1,
                 }
-            )
-            .unwrap(),
-        );
-        let pipeline = Arc::new(
-            GraphicsPipeline::start()
-                .vertex_input_single_buffer::<Vertex>()
-                .vertex_shader(vs.main_entry_point(), ())
-                .triangle_strip()
-                .viewports_dynamic_scissors_irrelevant(1)
-                .fragment_shader(fs.main_entry_point(), ())
-                .render_pass(Subpass::from(render_pass.clone(), 0).unwrap())
-                .build(device.clone())?,
-        );
+            },
+            pass: {
+                color: [color],
+                depth_stencil: {}
+            }
+        )
+        .unwrap();
+        let tex_offsets = [
+            fs::ty::Info {
+                texOffset: [0.0, 0.0],
+            },
+            fs::ty::Info {
+                texOffset: [0.5, 0.0],
+            },
+        ]
+        .try_map(|u| Self::make_uniform_buffer(allocator, u))?;
+        let transforms = [bytemuck::Zeroable::zeroed(); 2]
+            .try_map(|u| Self::make_uniform_buffer(allocator, u))?;
+        let pipeline = GraphicsPipeline::start()
+            .vertex_input_single_buffer::<Vertex>()
+            .vertex_shader(vs.entry_point("main").unwrap(), ())
+            .triangle_strip()
+            .viewports_dynamic_scissors_irrelevant(1)
+            .fragment_shader(fs.entry_point("main").unwrap(), ())
+            .render_pass(Subpass::from(render_pass.clone(), 0).unwrap())
+            .build(device.clone())?;
+        let init_params = ProjectionParameters {
+            mode: ProjectionMode::FromCamera, // This means `eyeOffset` should be zero, which would
+            // be what is returned by `bytemuck::Zeroable`
+            ipd: f32::NAN,
+            overlay_width: f32::NAN,
+            camera_calib: *camera_calib,
+            mvps: [Matrix4::identity(), Matrix4::identity()],
+        };
+        let layout = pipeline.layout().set_layouts().get(0).unwrap();
+        let sampler = Sampler::new(
+            device.clone(),
+            SamplerCreateInfo {
+                min_filter: Filter::Linear,
+                mag_filter: Filter::Linear,
+                ..Default::default()
+            },
+        )?;
+        let desc_sets = [0, 1].try_map(|i| {
+            Ok::<_, anyhow::Error>(PersistentDescriptorSet::new(
+                descriptor_set_allocator,
+                layout.clone(),
+                [
+                    WriteDescriptorSet::buffer(0, tex_offsets[i].clone()),
+                    WriteDescriptorSet::image_view_sampler(
+                        1,
+                        ImageView::new(source.clone(), ImageViewCreateInfo::from_image(&source))?,
+                        sampler.clone(),
+                    ),
+                    WriteDescriptorSet::buffer(2, transforms[i].clone()),
+                ],
+            )?)
+        })?;
         Ok(Self {
+            saved_parameters: init_params,
+            uniforms: Uniforms {
+                tex_offsets,
+                transforms,
+            },
+            desc_sets,
             device,
             render_pass,
             pipeline,
             source,
-            mode,
         })
     }
     pub fn project(
-        &self,
+        &mut self,
+        allocator: &FastMemoryAllocator,
+        cmdbuf_allocator: &StandardCommandBufferAllocator,
         after: impl GpuFuture,
         queue: Arc<Queue>,
         output: Arc<AttachmentImage>,
-        overlay_width: f32,
-        ipd: f32,
-        camera_calib: &crate::steam::StereoCamera,
-        (left, right): (&Matrix4<f32>, &Matrix4<f32>),
+        params: &ProjectionParameters,
     ) -> Result<impl GpuFuture> {
-        let framebuffer = Arc::new(
-            Framebuffer::start(self.render_pass.clone())
-                .add(ImageView::new(output.clone())?)?
-                .build()?,
-        );
-        let [w, h, _] = self.source.dimensions();
-        let mut desc_set_pool = SingleLayoutDescSetPool::new(
-            self.pipeline
-                .layout()
-                .descriptor_set_layouts()
-                .get(0)
-                .unwrap()
-                .clone(),
-        );
-        let mut cmdbuf =
-            AutoCommandBufferBuilder::primary(self.device.clone(), queue.family(), OneTimeSubmit)?;
-        cmdbuf.copy_image(
-            self.source.clone(),
-            [0, 0, 0],
-            0,
-            0,
-            output,
-            [0, 0, 0],
-            0,
-            0,
-            [w, h, 1],
-            1,
+        let framebuffer = Framebuffer::new(
+            self.render_pass.clone(),
+            vulkano::render_pass::FramebufferCreateInfo {
+                attachments: vec![ImageView::new(
+                    output.clone(),
+                    ImageViewCreateInfo::from_image(&output),
+                )?],
+                ..Default::default()
+            },
         )?;
+        self.update_uniforms(params)?;
+        let ProjectionParameters { overlay_width, .. } = params;
+        let [w, h] = self.source.dimensions().width_height();
+        let mut cmdbuf = AutoCommandBufferBuilder::primary(
+            cmdbuf_allocator,
+            queue.queue_family_index(),
+            OneTimeSubmit,
+        )?;
+        cmdbuf.copy_image(CopyImageInfo::images(self.source.clone(), output.clone()))?;
 
-        let sampler = Sampler::new(
-            self.device.clone(),
-            Filter::Linear,
-            Filter::Linear,
-            MipmapMode::Nearest,
-            SamplerAddressMode::ClampToEdge,
-            SamplerAddressMode::ClampToEdge,
-            SamplerAddressMode::ClampToEdge,
-            0.0,
-            1.0,
-            0.0,
-            0.0,
-        )?;
         // Y is flipped from the vertex Y because texture coordinate is top-down
         let vertex_buffer = CpuAccessibleBuffer::<[Vertex]>::from_iter(
-            self.device.clone(),
-            BufferUsage::vertex_buffer(),
+            allocator,
+            BufferUsage {
+                vertex_buffer: true,
+                ..BufferUsage::empty()
+            },
             false,
             [
                 Vertex {
@@ -269,52 +393,12 @@ impl Projection {
             .cloned(),
         )
         .unwrap();
-
-        let eye_offset = if self.mode == ProjectionMode::FromEye {
-            -camera_calib.left.extrinsics.position[0] as f32 - ipd / 2.0
-        } else {
-            0.0
-        };
         // Left
-        let uniform1 = vs::ty::Transform {
-            mvp: *left.as_ref(),
-            overlayWidth: overlay_width,
-            eyeOffset: eye_offset as f32,
-        };
-        let uniform2 = fs::ty::Info {
-            texOffset: [0.0, 0.0],
-        };
-        let uniform1 = CpuAccessibleBuffer::from_data(
-            self.device.clone(),
-            BufferUsage {
-                uniform_buffer: true,
-                ..BufferUsage::none()
-            },
-            false,
-            uniform1,
-        )?;
-        let uniform2 = CpuAccessibleBuffer::from_data(
-            self.device.clone(),
-            BufferUsage {
-                uniform_buffer: true,
-                ..BufferUsage::none()
-            },
-            false,
-            uniform2,
-        )?;
-        let mut desc_set_builder = desc_set_pool.next();
-        desc_set_builder
-            .add_buffer(uniform1)?
-            .add_sampled_image(ImageView::new(self.source.clone())?, sampler.clone())?
-            .add_buffer(uniform2)?;
-        let desc_set = Arc::new(desc_set_builder.build()?);
 
+        let mut render_pass_begin_info = RenderPassBeginInfo::framebuffer(framebuffer.clone());
+        render_pass_begin_info.clear_values = vec![None];
         cmdbuf
-            .begin_render_pass(
-                framebuffer.clone(),
-                SubpassContents::Inline,
-                [vulkano::format::ClearValue::None],
-            )?
+            .begin_render_pass(render_pass_begin_info, SubpassContents::Inline)?
             .set_viewport(
                 0,
                 [Viewport {
@@ -328,52 +412,17 @@ impl Projection {
                 PipelineBindPoint::Graphics,
                 self.pipeline.layout().clone(),
                 0,
-                desc_set,
+                self.desc_sets[0].clone(),
             )
             .bind_vertex_buffers(0, vertex_buffer.clone())
             .draw(vertex_buffer.len() as u32, 1, 0, 0)?
             .end_render_pass()?;
 
         // Right
-        let uniform1 = vs::ty::Transform {
-            mvp: *right.as_ref(),
-            overlayWidth: overlay_width,
-            eyeOffset: -eye_offset as f32,
-        };
-        let uniform2 = fs::ty::Info {
-            texOffset: [0.5, 0.0],
-        };
-        let uniform1 = CpuAccessibleBuffer::from_data(
-            self.device.clone(),
-            BufferUsage {
-                uniform_buffer: true,
-                ..BufferUsage::none()
-            },
-            false,
-            uniform1,
-        )?;
-        let uniform2 = CpuAccessibleBuffer::from_data(
-            self.device.clone(),
-            BufferUsage {
-                uniform_buffer: true,
-                ..BufferUsage::none()
-            },
-            false,
-            uniform2,
-        )?;
-        let mut desc_set_builder = desc_set_pool.next();
-        desc_set_builder
-            .add_buffer(uniform1)?
-            .add_sampled_image(ImageView::new(self.source.clone())?, sampler)?
-            .add_buffer(uniform2)?;
-        let desc_set = Arc::new(desc_set_builder.build()?);
-
+        let mut render_pass_begin_info = RenderPassBeginInfo::framebuffer(framebuffer);
+        render_pass_begin_info.clear_values = vec![None];
         cmdbuf
-            .begin_render_pass(
-                framebuffer,
-                SubpassContents::Inline,
-                [vulkano::format::ClearValue::None],
-            )?
+            .begin_render_pass(render_pass_begin_info, SubpassContents::Inline)?
             .set_viewport(
                 0,
                 [Viewport {
@@ -387,7 +436,7 @@ impl Projection {
                 PipelineBindPoint::Graphics,
                 self.pipeline.layout().clone(),
                 0,
-                desc_set,
+                self.desc_sets[1].clone(),
             )
             .bind_vertex_buffers(0, vertex_buffer.clone())
             .draw(vertex_buffer.len() as u32, 1, 0, 0)?

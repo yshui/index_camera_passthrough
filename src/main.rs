@@ -1,4 +1,4 @@
-#![feature(untagged_unions, try_trait_v2, destructuring_assignment)]
+#![feature(try_trait_v2, array_try_map, array_methods)]
 mod config;
 mod distortion_correction;
 mod events;
@@ -15,12 +15,18 @@ use nalgebra::{matrix, Matrix4};
 use openvr::*;
 use v4l::video::Capture;
 use vulkano::{
-    buffer::CpuBufferPool,
-    device::{self, physical::PhysicalDevice},
+    buffer::{BufferUsage, CpuAccessibleBuffer},
+    command_buffer::{
+        allocator::{CommandBufferAllocator, StandardCommandBufferAllocator},
+        CopyBufferToImageInfo, PrimaryCommandBufferAbstract,
+    },
+    descriptor_set::allocator::StandardDescriptorSetAllocator,
+    device::{self, DeviceCreateInfo, QueueCreateInfo},
     image::ImageUsage,
-    instance::{Instance, InstanceExtensions, Version},
+    instance::{Instance, InstanceCreateInfo, Version},
+    memory::allocator::{FastMemoryAllocator, MemoryAllocator, StandardMemoryAllocator},
     sync::GpuFuture,
-    VulkanObject,
+    VulkanLibrary, VulkanObject,
 };
 use yuv::GpuYuyvConverter;
 /// Camera image will be (size * 2, size)
@@ -48,37 +54,72 @@ fn find_index_camera() -> Result<std::path::PathBuf> {
 }
 
 static SPLASH_IMAGE: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/splash.png"));
+
+struct RawImage(Vec<u8>);
+unsafe impl vulkano::buffer::BufferContents for RawImage {
+    fn as_bytes_mut(&mut self) -> &mut [u8] {
+        self.0.as_mut_slice()
+    }
+    fn as_bytes(&self) -> &[u8] {
+        self.0.as_slice()
+    }
+    fn from_bytes(bytes: &[u8]) -> std::result::Result<&Self, bytemuck::PodCastError> {
+        unreachable!()
+    }
+    fn from_bytes_mut(bytes: &mut [u8]) -> std::result::Result<&mut Self, bytemuck::PodCastError> {
+        unreachable!()
+    }
+    fn size_of_element() -> vulkano::DeviceSize {
+        1
+    }
+}
+
 fn load_splash(
-    device: Arc<vulkano::device::Device>,
+    cmdbuf_allocator: &impl CommandBufferAllocator,
+    allocator: &impl MemoryAllocator,
     queue: Arc<vulkano::device::Queue>,
-    buffer: &CpuBufferPool<u8>,
 ) -> Result<Arc<vulkano::image::AttachmentImage>> {
     use vulkano::{
-        command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage::*, PrimaryCommandBuffer},
+        command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage::*},
         format::Format::*,
         image::AttachmentImage,
     };
-    let img =
-        image::load_from_memory_with_format(SPLASH_IMAGE, image::ImageFormat::Png)?.to_rgba8();
-    let subbuffer = buffer.chunk(img.as_raw().iter().copied())?;
-    let mut cmdbuf =
-        AutoCommandBufferBuilder::primary(device.clone(), queue.family(), OneTimeSubmit)?;
+    let img = RawImage(
+        image::load_from_memory_with_format(SPLASH_IMAGE, image::ImageFormat::Png)?
+            .into_rgb8()
+            .into_raw(),
+    );
+    let buffer = CpuAccessibleBuffer::from_data(
+        allocator,
+        BufferUsage {
+            transfer_src: true,
+            ..BufferUsage::empty()
+        },
+        false,
+        img,
+    )?;
+    let mut cmdbuf = AutoCommandBufferBuilder::primary(
+        cmdbuf_allocator,
+        queue.queue_family_index(),
+        OneTimeSubmit,
+    )?;
     let output = AttachmentImage::with_usage(
-        device,
+        allocator,
         [CAMERA_SIZE * 2, CAMERA_SIZE],
         R8G8B8A8_UNORM,
         ImageUsage {
-            transfer_source: false,
-            transfer_destination: true,
+            transfer_src: false,
+            transfer_dst: true,
             sampled: true,
             storage: false,
             color_attachment: true,
             depth_stencil_attachment: false,
             transient_attachment: false,
             input_attachment: false,
+            ..ImageUsage::empty()
         },
     )?;
-    cmdbuf.copy_buffer_to_image(subbuffer, output.clone())?;
+    cmdbuf.copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(buffer, output.clone()));
     cmdbuf
         .build()?
         .execute(queue)?
@@ -126,13 +167,17 @@ fn main() -> Result<()> {
     })
     .expect("Error setting Ctrl-C handler");
 
+    let library = VulkanLibrary::new()?;
     // Create vulkan instance, and setup openvr.
     // Then create a vulkan device based on openvr's requirements
+    let extensions = *library.supported_extensions();
     let instance = Instance::new(
-        None,
-        Version::V1_1,
-        &InstanceExtensions::supported_by_core()?,
-        None,
+        library,
+        InstanceCreateInfo {
+            max_api_version: Some(Version::V1_6),
+            enabled_extensions: extensions,
+            ..Default::default()
+        },
     )?;
     let vrsys = VRSystem::init()?;
     let mut target_device = 0u64;
@@ -140,14 +185,16 @@ fn main() -> Result<()> {
         vrsys.pin_mut().GetOutputDevice(
             &mut target_device,
             openvr_sys::ETextureType::TextureType_Vulkan,
-            std::mem::transmute(instance.internal_object().as_raw()),
+            std::mem::transmute(instance.handle().as_raw()),
         )
     };
 
     let target_device = ash::vk::PhysicalDevice::from_raw(target_device);
-    let device = PhysicalDevice::enumerate(&instance)
+    let device = instance
+        .enumerate_physical_devices()
+        .unwrap()
         .find(|physical_device| {
-            if physical_device.internal_object() == target_device {
+            if physical_device.handle() == target_device {
                 println!(
                     "Found matching device: {}",
                     physical_device.properties().device_name
@@ -159,28 +206,42 @@ fn main() -> Result<()> {
         })
         .with_context(|| anyhow!("Cannot find the device openvr asked for"))?;
     let queue_family = device
-        .queue_families()
-        .find(|qf| {
-            qf.supports_graphics() && qf.supports_stage(vulkano::sync::PipelineStage::AllGraphics)
-        })
+        .queue_family_properties()
+        .iter()
+        .position(|qf| qf.queue_flags.graphics)
         .with_context(|| anyhow!("Cannot create a suitable queue"))?;
     let (device, mut queues) = {
         let mut buf = Vec::new();
-        let extensions = device::DeviceExtensions::from(
-            vrsys.compositor().required_extensions(device, &mut buf),
-        )
-        .union(device.required_extensions());
+        let extensions: device::DeviceExtensions = vrsys
+            .compositor()
+            .required_extensions(&device, &mut buf)
+            .map(|ext| ext.to_str().unwrap())
+            .collect();
         device::Device::new(
             device,
-            &device::Features::none(),
-            &extensions,
-            [(queue_family, 1.0)],
+            DeviceCreateInfo {
+                enabled_features: device::Features::empty(),
+                enabled_extensions: extensions,
+                queue_create_infos: vec![QueueCreateInfo {
+                    queue_family_index: queue_family as u32,
+                    queues: vec![1.0],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
         )?
     };
     let queue = queues.next().unwrap();
-    let buffer = CpuBufferPool::upload(device.clone());
 
-    let splash = load_splash(device.clone(), queue.clone(), &buffer)?;
+    let cmdbuf_allocator = StandardCommandBufferAllocator::new(
+        device.clone(),
+        vulkano::command_buffer::allocator::StandardCommandBufferAllocatorCreateInfo::default(),
+    );
+    let descriptor_set_allocator = StandardDescriptorSetAllocator::new(device.clone());
+    let standard_allocator = StandardMemoryAllocator::new_default(device.clone());
+    let fast_allocator = FastMemoryAllocator::new_default(device.clone());
+
+    let splash = load_splash(&cmdbuf_allocator, &standard_allocator, queue.clone())?;
 
     // Load steam calibration data
     let hmd_id = vrsys.find_hmd().with_context(|| anyhow!("HMD not found"))?;
@@ -223,20 +284,19 @@ fn main() -> Result<()> {
             )
             .into_result()?;
     }
-
     // Allocate intermediate textures
     let textures: Result<Vec<_>> = (0..2)
         .map(|_| {
             vulkano::image::AttachmentImage::with_usage(
-                device.clone(),
+                &standard_allocator,
                 [CAMERA_SIZE * 2, CAMERA_SIZE],
                 vulkano::format::Format::R8G8B8A8_UNORM,
                 ImageUsage {
-                    transfer_source: true,
-                    transfer_destination: true,
+                    transfer_src: true,
+                    transfer_dst: true,
                     sampled: true,
                     color_attachment: true,
-                    ..ImageUsage::none()
+                    ..ImageUsage::empty()
                 },
             )
             .map_err(|e| e.into())
@@ -244,12 +304,17 @@ fn main() -> Result<()> {
         .collect();
     let textures = textures?;
 
-    let projector = match cfg.display_mode {
-        config::DisplayMode::Stereo { projection_mode } => Some(projection::Projection::new(
-            device.clone(),
-            textures[1].clone(),
-            projection_mode,
-        )?),
+    let (mut projector, projection_mode) = match cfg.display_mode {
+        config::DisplayMode::Stereo { projection_mode } => (
+            Some(projection::Projection::new(
+                device.clone(),
+                &standard_allocator,
+                &descriptor_set_allocator,
+                textures[1].clone(),
+                &lhcfg,
+            )?),
+            Some(projection_mode),
+        ),
         config::DisplayMode::Flat {
             eye: config::Eye::Left,
         } => {
@@ -264,7 +329,7 @@ fn main() -> Result<()> {
                     .pin_mut()
                     .SetOverlayTextureBounds(overlay.as_raw(), &bound)
             };
-            None
+            (None, None)
         }
         config::DisplayMode::Flat {
             eye: config::Eye::Right,
@@ -280,7 +345,7 @@ fn main() -> Result<()> {
                     .pin_mut()
                     .SetOverlayTextureBounds(overlay.as_raw(), &bound)
             };
-            None
+            (None, None)
         }
     };
 
@@ -341,9 +406,20 @@ fn main() -> Result<()> {
     // internal texture -> YUYV conversion -> textures[0]
     // textures[0] -> Lens correction -> textures[1]
     // textures[1] -> projection -> Final output
-    let converter = GpuYuyvConverter::new(device.clone(), CAMERA_SIZE * 2, CAMERA_SIZE)?;
-    let (correction, fov_left, fov_right) =
-        distortion_correction::StereoCorrection::new(device.clone(), textures[0].clone(), &lhcfg)?;
+    let converter = GpuYuyvConverter::new(
+        device.clone(),
+        &standard_allocator,
+        &descriptor_set_allocator,
+        CAMERA_SIZE * 2,
+        CAMERA_SIZE,
+    )?;
+    let (correction, fov_left, fov_right) = distortion_correction::StereoCorrection::new(
+        device.clone(),
+        &standard_allocator,
+        &descriptor_set_allocator,
+        textures[0].clone(),
+        &lhcfg,
+    )?;
     log::info!("Adjusted FOV: {:?} {:?}", fov_left, fov_right);
 
     // Fetch the first camera frame
@@ -359,12 +435,21 @@ fn main() -> Result<()> {
             error.as_mut_ptr(),
         )
     };
-    if unsafe { error.assume_init() } != openvr_sys::ETrackedPropertyError::TrackedProp_Success {
+    let error = unsafe { error.assume_init() };
+    if error != openvr_sys::ETrackedPropertyError::TrackedProp_Success {
         return Err(anyhow!("Cannot get device IPD {:?}", error));
     }
     log::info!("IPD: {}", ipd);
 
     let mut state = events::State::new(cfg.toggle_button, cfg.open_delay);
+    let mut projection_params =
+        projection_mode.map(|mode| crate::projection::ProjectionParameters {
+            ipd,
+            overlay_width: 1.0,
+            mvps: [Matrix4::identity(), Matrix4::identity()],
+            camera_calib: lhcfg,
+            mode,
+        });
     'main_loop: loop {
         if state.visible() {
             // We try to get the pose at the time when the camera frame is captured. GetDeviceToAbsoluteTrackingPose
@@ -386,18 +471,15 @@ fn main() -> Result<()> {
             let hmd_transform = vrsys.hmd_transform(-elapsed.as_secs_f32());
             // Allocate final image
             let output = vulkano::image::AttachmentImage::with_usage(
-                device.clone(),
+                &fast_allocator,
                 [CAMERA_SIZE * 2, CAMERA_SIZE],
                 vulkano::format::Format::R8G8B8A8_UNORM,
                 vulkano::image::ImageUsage {
-                    transfer_source: true,
-                    transfer_destination: true,
+                    transfer_src: true,
+                    transfer_dst: true,
                     sampled: true,
-                    storage: false,
                     color_attachment: true,
-                    depth_stencil_attachment: false,
-                    transient_attachment: false,
-                    input_attachment: false,
+                    ..ImageUsage::empty()
                 },
             )?;
 
@@ -409,10 +491,11 @@ fn main() -> Result<()> {
             }
             // First convert YUYV to RGB
             let future = converter.yuyv_buffer_to_vulkan_image(
+                &fast_allocator,
+                &cmdbuf_allocator,
                 frame,
                 vulkano::sync::now(device.clone()),
                 queue.clone(),
-                &buffer,
                 textures[0].clone(),
             )?;
 
@@ -439,33 +522,47 @@ fn main() -> Result<()> {
             };
 
             // TODO combine correction and projection
-            if let Some(projector) = projector.as_ref() {
+            if let Some(projector) = projector.as_mut() {
+                let projection_params = projection_params.as_mut().unwrap();
                 // Then do lens correction
-                let future = correction.correct(future, queue.clone(), textures[1].clone())?;
+                let future = correction.correct(
+                    &cmdbuf_allocator,
+                    &fast_allocator,
+                    future,
+                    queue.clone(),
+                    textures[1].clone(),
+                )?;
                 // Finally apply projection
                 // Calculate each eye's Model View Project matrix at the moment the current frame is taken
                 let (l, r) = projector.calculate_mvp(
+                    projection_params.mode,
                     &overlay_transform,
                     &lhcfg,
                     (&fov_left, &fov_right),
                     &vrsys,
                     &hmd_transform,
                 );
+                projection_params.mvps = [l, r];
                 let future = projector.project(
+                    &fast_allocator,
+                    &cmdbuf_allocator,
                     future,
                     queue.clone(),
                     output.clone(),
-                    1.0,
-                    ipd,
-                    &lhcfg,
-                    (&l, &r),
+                    projection_params,
                 )?;
 
                 // Wait for work to complete
                 future.then_signal_fence().wait(None)?;
             } else {
                 // Lens correction
-                let future = correction.correct(future, queue.clone(), output.clone())?;
+                let future = correction.correct(
+                    &cmdbuf_allocator,
+                    &fast_allocator,
+                    future,
+                    queue.clone(),
+                    output.clone(),
+                )?;
                 future.then_signal_fence().wait(None)?;
             }
 
@@ -497,9 +594,9 @@ fn main() -> Result<()> {
             )
         } {
             let event = unsafe { event.assume_init_ref() };
-            log::debug!("{:?}", unsafe {
-                std::mem::transmute::<_, openvr_sys::EVREventType>(event.eventType)
-            });
+            //log::debug!("{:?}", unsafe {
+            //    std::mem::transmute::<_, openvr_sys::EVREventType>(event.eventType)
+            //});
             if event.eventType == openvr_sys::EVREventType::VREvent_ButtonPress as u32 {
                 log::debug!("{:?}", unsafe { event.data.controller.button });
                 if unsafe { event.data.controller.button == 33 } {

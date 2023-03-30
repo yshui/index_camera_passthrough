@@ -4,20 +4,28 @@ use std::sync::Arc;
 use vulkano::{
     buffer::{BufferUsage, CpuAccessibleBuffer, TypedBufferAccess},
     command_buffer::{
-        AutoCommandBufferBuilder, CommandBufferUsage::OneTimeSubmit, SubpassContents,
+        allocator::StandardCommandBufferAllocator, AutoCommandBufferBuilder,
+        CommandBufferUsage::OneTimeSubmit, RenderPassBeginInfo, SubpassContents,
     },
-    descriptor_set::PersistentDescriptorSet,
+    descriptor_set::{
+        allocator::StandardDescriptorSetAllocator, PersistentDescriptorSet, WriteDescriptorSet,
+    },
     device::{Device, Queue},
-    image::{view::ImageView, AttachmentImage},
-    pipeline::GraphicsPipeline,
-    pipeline::{viewport::Viewport, PipelineBindPoint},
-    render_pass::{Framebuffer, RenderPass, Subpass},
-    sampler::{Filter, MipmapMode, Sampler, SamplerAddressMode},
+    image::{
+        view::{ImageView, ImageViewCreateInfo},
+        AttachmentImage, ImageAccess,
+    },
+    memory::allocator::{FastMemoryAllocator, StandardMemoryAllocator},
+    pipeline::{graphics::viewport::Viewport, PipelineBindPoint},
+    pipeline::{GraphicsPipeline, Pipeline},
+    render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass},
+    sampler::{Filter, Sampler, SamplerCreateInfo},
     sync::GpuFuture,
 };
 
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 #[allow(non_snake_case)]
+#[repr(C)]
 struct Vertex {
     position: [f32; 2],
     inCoord: [f32; 2],
@@ -75,11 +83,7 @@ impl StereoCorrection {
     // the edge of the field of view of the distorted image.
     //
     // Returns the scales and the adjusted fovs
-    fn find_scale(
-        coeff: &[f64; 4],
-        center: &[f64; 2],
-        focal: &[f64; 2],
-    ) -> [(f64, f64); 2] {
+    fn find_scale(coeff: &[f64; 4], center: &[f64; 2], focal: &[f64; 2]) -> [(f64, f64); 2] {
         [0, 1].map(|i| {
             let min_edge_dist = center[i].min(1.0 - center[i]) / focal[i];
             // Find the input theta angle where Undistort(theta) = min_edge_dist
@@ -91,10 +95,7 @@ impl StereoCorrection {
                     // Find the input coordinates that will give us that theta
                     let target_edge = theta.tan();
                     log::info!("{}", target_edge);
-                    (
-                        target_edge / (0.5 / focal[i]),
-                        1.0 / min_edge_dist / 2.0,
-                    )
+                    (target_edge / (0.5 / focal[i]), 1.0 / min_edge_dist / 2.0)
                 }
             } else {
                 // Cannot find scale so just don't scale
@@ -106,13 +107,15 @@ impl StereoCorrection {
     /// returns also the adjusted FOV for left and right
     pub fn new(
         device: Arc<Device>,
+        allocator: &StandardMemoryAllocator,
+        descriptor_set_allocator: &StandardDescriptorSetAllocator,
         input: Arc<AttachmentImage>,
         camera_calib: &crate::steam::StereoCamera,
     ) -> Result<(Self, [f64; 2], [f64; 2])> {
-        if input.dimensions()[0] != input.dimensions()[1] * 2 {
+        if input.dimensions().width() != input.dimensions().height() * 2 {
             return Err(anyhow!("Input not square"));
         }
-        let size = input.dimensions()[1] as f64;
+        let size = input.dimensions().height() as f64;
         let center_left = [
             camera_calib.left.intrinsics.center_x / size,
             camera_calib.left.intrinsics.center_y / size,
@@ -131,87 +134,72 @@ impl StereoCorrection {
         ];
         let coeff_left = camera_calib.left.intrinsics.distort.coeffs;
         let coeff_right = camera_calib.left.intrinsics.distort.coeffs;
-        let vs = vs::Shader::load(device.clone())?;
-        let fs = fs::Shader::load(device.clone())?;
-        let render_pass1 = Arc::new(
-            vulkano::single_pass_renderpass!(device.clone(),
-                attachments: {
-                    color: {
-                        load: DontCare,
-                        store: Store,
-                        format: vulkano::format::Format::R8G8B8A8_UNORM,
-                        samples: 1,
-                    }
-                },
-                pass: {
-                    color: [color],
-                    depth_stencil: {}
+        let vs = vs::load(device.clone())?;
+        let fs = fs::load(device.clone())?;
+        let render_pass1 = vulkano::single_pass_renderpass!(device.clone(),
+            attachments: {
+                color: {
+                    load: DontCare,
+                    store: Store,
+                    format: vulkano::format::Format::R8G8B8A8_UNORM,
+                    samples: 1,
                 }
-            )
-            .unwrap(),
-        );
-        let render_pass2 = Arc::new(
-            vulkano::single_pass_renderpass!(device.clone(),
-                attachments: {
-                    color: {
-                        load: Load,
-                        store: Store,
-                        format: vulkano::format::Format::R8G8B8A8_UNORM,
-                        samples: 1,
-                    }
-                },
-                pass: {
-                    color: [color],
-                    depth_stencil: {}
+            },
+            pass: {
+                color: [color],
+                depth_stencil: {}
+            }
+        )
+        .unwrap();
+        let render_pass2 = vulkano::single_pass_renderpass!(device.clone(),
+            attachments: {
+                color: {
+                    load: Load,
+                    store: Store,
+                    format: vulkano::format::Format::R8G8B8A8_UNORM,
+                    samples: 1,
                 }
-            )
-            .unwrap(),
-        );
-        let pipeline1 = Arc::new(
-            GraphicsPipeline::start()
-                .vertex_input_single_buffer::<Vertex>()
-                .vertex_shader(vs.main_entry_point(), ())
-                .triangle_strip()
-                .viewports([Viewport {
-                    origin: [0.0, 0.0],
-                    dimensions: [size as f32, size as f32],
-                    depth_range: -1.0..1.0,
-                }])
-                .fragment_shader(fs.main_entry_point(), ())
-                .render_pass(Subpass::from(render_pass1.clone(), 0).unwrap())
-                .build(device.clone())?,
-        );
-        let pipeline2 = Arc::new(
-            GraphicsPipeline::start()
-                .vertex_input_single_buffer::<Vertex>()
-                .vertex_shader(vs.main_entry_point(), ())
-                .triangle_strip()
-                .viewports([Viewport {
-                    origin: [size as f32, 0.0],
-                    dimensions: [size as f32, size as f32],
-                    depth_range: -1.0..1.0,
-                }])
-                .fragment_shader(fs.main_entry_point(), ())
-                .render_pass(Subpass::from(render_pass2.clone(), 0).unwrap())
-                .build(device.clone())?,
-        );
+            },
+            pass: {
+                color: [color],
+                depth_stencil: {}
+            }
+        )
+        .unwrap();
+        let pipeline1 = GraphicsPipeline::start()
+            .vertex_input_single_buffer::<Vertex>()
+            .vertex_shader(vs.entry_point("main").unwrap(), ())
+            .triangle_strip()
+            .viewports([Viewport {
+                origin: [0.0, 0.0],
+                dimensions: [size as f32, size as f32],
+                depth_range: -1.0..1.0,
+            }])
+            .fragment_shader(fs.entry_point("main").unwrap(), ())
+            .render_pass(Subpass::from(render_pass1.clone(), 0).unwrap())
+            .build(device.clone())?;
+        let pipeline2 = GraphicsPipeline::start()
+            .vertex_input_single_buffer::<Vertex>()
+            .vertex_shader(vs.entry_point("main").unwrap(), ())
+            .triangle_strip()
+            .viewports([Viewport {
+                origin: [size as f32, 0.0],
+                dimensions: [size as f32, size as f32],
+                depth_range: -1.0..1.0,
+            }])
+            .fragment_shader(fs.entry_point("main").unwrap(), ())
+            .render_pass(Subpass::from(render_pass2.clone(), 0).unwrap())
+            .build(device.clone())?;
         let sampler = Sampler::new(
             device.clone(),
-            Filter::Linear,
-            Filter::Linear,
-            MipmapMode::Nearest,
-            SamplerAddressMode::ClampToEdge,
-            SamplerAddressMode::ClampToEdge,
-            SamplerAddressMode::ClampToEdge,
-            0.0,
-            1.0,
-            0.0,
-            0.0,
+            SamplerCreateInfo {
+                mag_filter: Filter::Linear,
+                min_filter: Filter::Linear,
+                ..Default::default()
+            },
         )?;
 
         // Left pass
-        let desc_set_layout = pipeline1.layout().descriptor_set_layouts().get(0).unwrap();
-        let mut desc_set_builder = PersistentDescriptorSet::start(desc_set_layout.clone());
         let scale_fov_left = Self::find_scale(&coeff_left, &center_left, &focal_left);
         let uniform = fs::ty::Parameters {
             center: center_left.map(|x| x as f32),
@@ -223,23 +211,29 @@ impl StereoCorrection {
             _dummy0: Default::default(),
         };
         let uniform = CpuAccessibleBuffer::from_data(
-            device.clone(),
+            allocator,
             BufferUsage {
                 uniform_buffer: true,
-                ..BufferUsage::none()
+                ..BufferUsage::empty()
             },
             false,
             uniform,
         )?;
-
-        desc_set_builder
-            .add_buffer(uniform)?
-            .add_sampled_image(ImageView::new(input.clone())?, sampler.clone())?;
-        let desc_set1 = Arc::new(desc_set_builder.build()?);
+        let desc_set_layout = pipeline1.layout().set_layouts().get(0).unwrap();
+        let mut desc_set1 = PersistentDescriptorSet::new(
+            descriptor_set_allocator,
+            desc_set_layout.clone(),
+            [
+                WriteDescriptorSet::buffer(0, uniform),
+                WriteDescriptorSet::image_view_sampler(
+                    1,
+                    ImageView::new(input.clone(), ImageViewCreateInfo::from_image(&input))?,
+                    sampler.clone(),
+                ),
+            ],
+        )?;
 
         // Right pass
-        let desc_set_layout = pipeline2.layout().descriptor_set_layouts().get(0).unwrap();
-        let mut desc_set_builder = PersistentDescriptorSet::start(desc_set_layout.clone());
         let scale_fov_right = Self::find_scale(&coeff_right, &center_right, &focal_right);
         let uniform = fs::ty::Parameters {
             center: center_right.map(|x| x as f32),
@@ -251,19 +245,28 @@ impl StereoCorrection {
             _dummy0: Default::default(),
         };
         let uniform = CpuAccessibleBuffer::from_data(
-            device.clone(),
+            allocator,
             BufferUsage {
                 uniform_buffer: true,
-                ..BufferUsage::none()
+                ..BufferUsage::empty()
             },
             false,
             uniform,
         )?;
-
-        desc_set_builder
-            .add_buffer(uniform)?
-            .add_sampled_image(ImageView::new(input)?, sampler)?;
-        let desc_set2 = Arc::new(desc_set_builder.build()?);
+        let desc_set_layout = pipeline2.layout().set_layouts().get(0).unwrap();
+        let image_view_create_info = ImageViewCreateInfo::from_image(&input);
+        let desc_set2 = PersistentDescriptorSet::new(
+            descriptor_set_allocator,
+            desc_set_layout.clone(),
+            [
+                WriteDescriptorSet::buffer(0, uniform),
+                WriteDescriptorSet::image_view_sampler(
+                    1,
+                    ImageView::new(input, image_view_create_info)?,
+                    sampler,
+                ),
+            ],
+        )?;
 
         Ok((
             Self {
@@ -281,6 +284,8 @@ impl StereoCorrection {
     }
     pub fn correct(
         &self,
+        cmdbuf_allocator: &StandardCommandBufferAllocator,
+        allocator: &FastMemoryAllocator,
         after: impl GpuFuture,
         queue: Arc<Queue>,
         output: Arc<AttachmentImage>,
@@ -289,16 +294,22 @@ impl StereoCorrection {
         if queue.device() != &self.device {
             return Err(anyhow!("Device mismatch"));
         }
-        if let Some(queue) = after.queue() {
-            if !queue.is_same(&queue) {
+        if let Some(after_queue) = after.queue() {
+            if after_queue != queue {
                 return Err(anyhow!("Queue mismatch"));
             }
         }
-        let mut cmdbuf =
-            AutoCommandBufferBuilder::primary(self.device.clone(), queue.family(), OneTimeSubmit)?;
+        let mut cmdbuf = AutoCommandBufferBuilder::primary(
+            cmdbuf_allocator,
+            queue.queue_family_index(),
+            OneTimeSubmit,
+        )?;
         let vertex_buffer = CpuAccessibleBuffer::<[Vertex]>::from_iter(
-            self.device.clone(),
-            BufferUsage::vertex_buffer(),
+            allocator,
+            BufferUsage {
+                vertex_buffer: true,
+                ..BufferUsage::empty()
+            },
             false,
             [
                 Vertex {
@@ -323,17 +334,20 @@ impl StereoCorrection {
         )
         .unwrap();
         // Left side
-        let framebuffer = Arc::new(
-            Framebuffer::start(self.render_pass1.clone())
-                .add(ImageView::new(output.clone())?)?
-                .build()?,
-        );
+        let framebuffer = Framebuffer::new(
+            self.render_pass1.clone(),
+            FramebufferCreateInfo {
+                attachments: vec![ImageView::new(
+                    output.clone(),
+                    ImageViewCreateInfo::from_image(&output),
+                )?],
+                ..Default::default()
+            },
+        )?;
+        let mut render_pass_begin_info = RenderPassBeginInfo::framebuffer(framebuffer);
+        render_pass_begin_info.clear_values = vec![None];
         cmdbuf
-            .begin_render_pass(
-                framebuffer,
-                SubpassContents::Inline,
-                [vulkano::format::ClearValue::None],
-            )?
+            .begin_render_pass(render_pass_begin_info, SubpassContents::Inline)?
             .bind_pipeline_graphics(self.pipeline1.clone())
             .bind_descriptor_sets(
                 PipelineBindPoint::Graphics,
@@ -345,17 +359,18 @@ impl StereoCorrection {
             .draw(vertex_buffer.len() as u32, 1, 0, 0)?
             .end_render_pass()?;
         // Right side
-        let framebuffer = Arc::new(
-            Framebuffer::start(self.render_pass2.clone())
-                .add(ImageView::new(output)?)?
-                .build()?,
-        );
+        let image_view_create_info = ImageViewCreateInfo::from_image(&output);
+        let framebuffer = Framebuffer::new(
+            self.render_pass2.clone(),
+            FramebufferCreateInfo {
+                attachments: vec![ImageView::new(output, image_view_create_info)?],
+                ..Default::default()
+            },
+        )?;
+        let mut render_pass_begin_info = RenderPassBeginInfo::framebuffer(framebuffer);
+        render_pass_begin_info.clear_values = vec![None];
         cmdbuf
-            .begin_render_pass(
-                framebuffer,
-                SubpassContents::Inline,
-                [vulkano::format::ClearValue::None],
-            )?
+            .begin_render_pass(render_pass_begin_info, SubpassContents::Inline)?
             .bind_pipeline_graphics(self.pipeline2.clone())
             .bind_descriptor_sets(
                 PipelineBindPoint::Graphics,
@@ -388,5 +403,8 @@ mod fs {
     vulkano_shaders::shader! {
         ty: "fragment",
         path: "shaders/stereo_correction.frag",
+        types_meta: {
+            #[derive(::bytemuck::Pod, ::bytemuck::Zeroable, Copy, Clone, Debug)]
+        },
     }
 }
