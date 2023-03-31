@@ -898,6 +898,7 @@ dependencies = [
  "humantime-serde",
  "image",
  "itertools 0.10.5",
+ "libloading",
  "log",
  "nalgebra",
  "openvr_sys",

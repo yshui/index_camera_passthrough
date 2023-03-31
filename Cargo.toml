@@ -30,6 +30,7 @@ xdg = "2.4.0"
 toml = "0.7.3"
 humantime-serde = "1.0.1"
 bytemuck = { version = "^1.7", features = ["derive"] }
+libloading = "0.7.4"
 
 [features]
 

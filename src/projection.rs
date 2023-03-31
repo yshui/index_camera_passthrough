@@ -26,7 +26,14 @@ use vulkano::{
         AttachmentImage, ImageAccess,
     },
     memory::allocator::{AllocationCreationError, FastMemoryAllocator, StandardMemoryAllocator},
-    pipeline::{graphics::viewport::Viewport, GraphicsPipeline, Pipeline, PipelineBindPoint},
+    pipeline::{
+        graphics::{
+            input_assembly::{InputAssemblyState, PrimitiveTopology},
+            vertex_input::BuffersDefinition,
+            viewport::{Viewport, ViewportState},
+        },
+        GraphicsPipeline, Pipeline, PipelineBindPoint,
+    },
     render_pass::{Framebuffer, RenderPass, Subpass},
     sampler::{Filter, Sampler, SamplerCreateInfo},
     sync::GpuFuture,
@@ -61,18 +68,11 @@ pub struct ProjectionParameters {
     pub mode: ProjectionMode,
 }
 
-struct UniformData {
-    tex_offsets: [fs::ty::Info; 2],
-    transforms: [vs::ty::Transform; 2],
-}
-
 struct Uniforms {
-    tex_offsets: [Arc<CpuAccessibleBuffer<fs::ty::Info>>; 2],
     transforms: [Arc<CpuAccessibleBuffer<vs::ty::Transform>>; 2],
 }
 
 pub struct Projection {
-    device: Arc<Device>,
     source: Arc<AttachmentImage>,
     pipeline: Arc<GraphicsPipeline>,
     render_pass: Arc<RenderPass>,
@@ -232,6 +232,7 @@ impl Projection {
         allocator: &StandardMemoryAllocator,
         uniform: T,
     ) -> Result<Arc<CpuAccessibleBuffer<T>>, AllocationCreationError> {
+        log::debug!("uniform buffer size {}", std::mem::size_of::<T>());
         CpuAccessibleBuffer::from_data(
             allocator,
             BufferUsage {
@@ -282,10 +283,12 @@ impl Projection {
         let transforms = [bytemuck::Zeroable::zeroed(); 2]
             .try_map(|u| Self::make_uniform_buffer(allocator, u))?;
         let pipeline = GraphicsPipeline::start()
-            .vertex_input_single_buffer::<Vertex>()
+            .vertex_input_state(BuffersDefinition::new().vertex::<Vertex>())
             .vertex_shader(vs.entry_point("main").unwrap(), ())
-            .triangle_strip()
-            .viewports_dynamic_scissors_irrelevant(1)
+            .input_assembly_state(
+                InputAssemblyState::new().topology(PrimitiveTopology::TriangleStrip),
+            )
+            .viewport_state(ViewportState::viewport_dynamic_scissor_irrelevant())
             .fragment_shader(fs.entry_point("main").unwrap(), ())
             .render_pass(Subpass::from(render_pass.clone(), 0).unwrap())
             .build(device.clone())?;
@@ -299,7 +302,7 @@ impl Projection {
         };
         let layout = pipeline.layout().set_layouts().get(0).unwrap();
         let sampler = Sampler::new(
-            device.clone(),
+            device,
             SamplerCreateInfo {
                 min_filter: Filter::Linear,
                 mag_filter: Filter::Linear,
@@ -311,24 +314,20 @@ impl Projection {
                 descriptor_set_allocator,
                 layout.clone(),
                 [
-                    WriteDescriptorSet::buffer(0, tex_offsets[i].clone()),
+                    WriteDescriptorSet::buffer(0, transforms[i].clone()),
                     WriteDescriptorSet::image_view_sampler(
                         1,
                         ImageView::new(source.clone(), ImageViewCreateInfo::from_image(&source))?,
                         sampler.clone(),
                     ),
-                    WriteDescriptorSet::buffer(2, transforms[i].clone()),
+                    WriteDescriptorSet::buffer(2, tex_offsets[i].clone()),
                 ],
             )?)
         })?;
         Ok(Self {
             saved_parameters: init_params,
-            uniforms: Uniforms {
-                tex_offsets,
-                transforms,
-            },
+            uniforms: Uniforms { transforms },
             desc_sets,
-            device,
             render_pass,
             pipeline,
             source,

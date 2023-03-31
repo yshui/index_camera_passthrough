@@ -17,7 +17,14 @@ use vulkano::{
     },
     memory::allocator::{FastMemoryAllocator, StandardMemoryAllocator},
     pipeline::{graphics::viewport::Viewport, PipelineBindPoint},
-    pipeline::{GraphicsPipeline, Pipeline},
+    pipeline::{
+        graphics::{
+            input_assembly::{InputAssemblyState, PrimitiveTopology},
+            vertex_input::BuffersDefinition,
+            viewport::ViewportState,
+        },
+        GraphicsPipeline, Pipeline,
+    },
     render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass},
     sampler::{Filter, Sampler, SamplerCreateInfo},
     sync::GpuFuture,
@@ -35,20 +42,14 @@ vulkano::impl_vertex!(Vertex, position, inCoord);
 /// Lens correction for a stereo side-by-side image
 pub struct StereoCorrection {
     device: Arc<Device>,
-    // Left
-    render_pass1: Arc<RenderPass>,
-    pipeline1: Arc<GraphicsPipeline>,
-    desc_set1: Arc<PersistentDescriptorSet>,
-    // Right
-    render_pass2: Arc<RenderPass>,
-    pipeline2: Arc<GraphicsPipeline>,
-    desc_set2: Arc<PersistentDescriptorSet>,
+    render_passes: [Arc<RenderPass>; 2],
+    pipelines: [Arc<GraphicsPipeline>; 2],
+    desc_sets: [Arc<PersistentDescriptorSet>; 2],
 }
 
 impl StereoCorrection {
     /// i.e. solving Undistort(src) = dst for the smallest non-zero root.
     fn undistort_inverse(coeff: &[f64; 4], dst: f64) -> Option<f64> {
-        let dst = dst as f64;
         // solving: x * (1 + k1*x^2 + k2*x^4 + k3*x^6 + k4*x^8) - dst = 0
         let f = |x: f64| {
             let x2 = x * x;
@@ -136,60 +137,54 @@ impl StereoCorrection {
         let coeff_right = camera_calib.left.intrinsics.distort.coeffs;
         let vs = vs::load(device.clone())?;
         let fs = fs::load(device.clone())?;
-        let render_pass1 = vulkano::single_pass_renderpass!(device.clone(),
-            attachments: {
-                color: {
-                    load: DontCare,
-                    store: Store,
-                    format: vulkano::format::Format::R8G8B8A8_UNORM,
-                    samples: 1,
+        let render_passes = [
+            vulkano::single_pass_renderpass!(device.clone(),
+                attachments: {
+                    color: {
+                        load: DontCare,
+                        store: Store,
+                        format: vulkano::format::Format::R8G8B8A8_UNORM,
+                        samples: 1,
+                    }
+                },
+                pass: {
+                    color: [color],
+                    depth_stencil: {}
                 }
-            },
-            pass: {
-                color: [color],
-                depth_stencil: {}
-            }
-        )
-        .unwrap();
-        let render_pass2 = vulkano::single_pass_renderpass!(device.clone(),
-            attachments: {
-                color: {
-                    load: Load,
-                    store: Store,
-                    format: vulkano::format::Format::R8G8B8A8_UNORM,
-                    samples: 1,
+            )?,
+            vulkano::single_pass_renderpass!(device.clone(),
+                attachments: {
+                    color: {
+                        load: Load,
+                        store: Store,
+                        format: vulkano::format::Format::R8G8B8A8_UNORM,
+                        samples: 1,
+                    }
+                },
+                pass: {
+                    color: [color],
+                    depth_stencil: {}
                 }
-            },
-            pass: {
-                color: [color],
-                depth_stencil: {}
-            }
-        )
-        .unwrap();
-        let pipeline1 = GraphicsPipeline::start()
-            .vertex_input_single_buffer::<Vertex>()
-            .vertex_shader(vs.entry_point("main").unwrap(), ())
-            .triangle_strip()
-            .viewports([Viewport {
-                origin: [0.0, 0.0],
-                dimensions: [size as f32, size as f32],
-                depth_range: -1.0..1.0,
-            }])
-            .fragment_shader(fs.entry_point("main").unwrap(), ())
-            .render_pass(Subpass::from(render_pass1.clone(), 0).unwrap())
-            .build(device.clone())?;
-        let pipeline2 = GraphicsPipeline::start()
-            .vertex_input_single_buffer::<Vertex>()
-            .vertex_shader(vs.entry_point("main").unwrap(), ())
-            .triangle_strip()
-            .viewports([Viewport {
-                origin: [size as f32, 0.0],
-                dimensions: [size as f32, size as f32],
-                depth_range: -1.0..1.0,
-            }])
-            .fragment_shader(fs.entry_point("main").unwrap(), ())
-            .render_pass(Subpass::from(render_pass2.clone(), 0).unwrap())
-            .build(device.clone())?;
+            )?,
+        ];
+        let pipelines = [0, 1].try_map(|id| {
+            GraphicsPipeline::start()
+                .vertex_input_state(BuffersDefinition::new().vertex::<Vertex>())
+                .vertex_shader(vs.entry_point("main").unwrap(), ())
+                .input_assembly_state(
+                    InputAssemblyState::new().topology(PrimitiveTopology::TriangleStrip),
+                )
+                .viewport_state(ViewportState::viewport_fixed_scissor_irrelevant([
+                    Viewport {
+                        origin: [size as f32 * id as f32, 0.0],
+                        dimensions: [size as f32, size as f32],
+                        depth_range: -1.0..1.0,
+                    },
+                ]))
+                .fragment_shader(fs.entry_point("main").unwrap(), ())
+                .render_pass(Subpass::from(render_passes[id].clone(), 0).unwrap())
+                .build(device.clone())
+        })?;
         let sampler = Sampler::new(
             device.clone(),
             SamplerCreateInfo {
@@ -199,87 +194,57 @@ impl StereoCorrection {
             },
         )?;
 
+        let coeffs = [
+            (0, coeff_left, center_left, focal_left),
+            (1, coeff_right, center_right, focal_right),
+        ];
+        let scale_fov = coeffs
+            .each_ref()
+            .map(|(_, coeff, center, focal)| Self::find_scale(coeff, center, focal));
         // Left pass
-        let scale_fov_left = Self::find_scale(&coeff_left, &center_left, &focal_left);
-        let uniform = fs::ty::Parameters {
-            center: center_left.map(|x| x as f32),
-            dcoef: coeff_left.map(|x| x as f32),
-            focal: focal_left.map(|x| x as f32),
-            sensorSize: size as f32,
-            scale: [scale_fov_left[0].0 as f32, scale_fov_left[1].0 as f32],
-            texOffset: [0.0, 0.0],
-            _dummy0: Default::default(),
-        };
-        let uniform = CpuAccessibleBuffer::from_data(
-            allocator,
-            BufferUsage {
-                uniform_buffer: true,
-                ..BufferUsage::empty()
-            },
-            false,
-            uniform,
-        )?;
-        let desc_set_layout = pipeline1.layout().set_layouts().get(0).unwrap();
-        let mut desc_set1 = PersistentDescriptorSet::new(
-            descriptor_set_allocator,
-            desc_set_layout.clone(),
-            [
-                WriteDescriptorSet::buffer(0, uniform),
-                WriteDescriptorSet::image_view_sampler(
-                    1,
-                    ImageView::new(input.clone(), ImageViewCreateInfo::from_image(&input))?,
-                    sampler.clone(),
-                ),
-            ],
-        )?;
-
-        // Right pass
-        let scale_fov_right = Self::find_scale(&coeff_right, &center_right, &focal_right);
-        let uniform = fs::ty::Parameters {
-            center: center_right.map(|x| x as f32),
-            dcoef: coeff_right.map(|x| x as f32),
-            focal: focal_right.map(|x| x as f32),
-            sensorSize: size as f32,
-            scale: [scale_fov_right[0].0 as f32, scale_fov_right[1].0 as f32],
-            texOffset: [0.5, 0.0], // right side of the texture
-            _dummy0: Default::default(),
-        };
-        let uniform = CpuAccessibleBuffer::from_data(
-            allocator,
-            BufferUsage {
-                uniform_buffer: true,
-                ..BufferUsage::empty()
-            },
-            false,
-            uniform,
-        )?;
-        let desc_set_layout = pipeline2.layout().set_layouts().get(0).unwrap();
-        let image_view_create_info = ImageViewCreateInfo::from_image(&input);
-        let desc_set2 = PersistentDescriptorSet::new(
-            descriptor_set_allocator,
-            desc_set_layout.clone(),
-            [
-                WriteDescriptorSet::buffer(0, uniform),
-                WriteDescriptorSet::image_view_sampler(
-                    1,
-                    ImageView::new(input, image_view_create_info)?,
-                    sampler,
-                ),
-            ],
-        )?;
+        let desc_sets = coeffs.try_map(|(id, coeff, center, focal)| {
+            let uniform = fs::ty::Parameters {
+                center: center.map(|x| x as f32),
+                dcoef: coeff.map(|x| x as f32),
+                focal: focal.map(|x| x as f32),
+                sensorSize: size as f32,
+                scale: [scale_fov[id][0].0 as f32, scale_fov[id][1].0 as f32],
+                texOffset: [0.5 * id as f32, 0.0],
+                _dummy0: Default::default(),
+            };
+            let uniform = CpuAccessibleBuffer::from_data(
+                allocator,
+                BufferUsage {
+                    uniform_buffer: true,
+                    ..BufferUsage::empty()
+                },
+                false,
+                uniform,
+            )?;
+            let desc_set_layout = pipelines[id].layout().set_layouts().get(0).unwrap();
+            Ok::<_, anyhow::Error>(PersistentDescriptorSet::new(
+                descriptor_set_allocator,
+                desc_set_layout.clone(),
+                [
+                    WriteDescriptorSet::buffer(0, uniform),
+                    WriteDescriptorSet::image_view_sampler(
+                        1,
+                        ImageView::new(input.clone(), ImageViewCreateInfo::from_image(&input))?,
+                        sampler.clone(),
+                    ),
+                ],
+            )?)
+        })?;
 
         Ok((
             Self {
                 device,
-                render_pass1,
-                pipeline1,
-                desc_set1,
-                render_pass2,
-                pipeline2,
-                desc_set2,
+                render_passes,
+                pipelines,
+                desc_sets,
             },
-            [scale_fov_left[0].1, scale_fov_left[1].1],
-            [scale_fov_right[0].1, scale_fov_right[1].1],
+            [scale_fov[0][0].1, scale_fov[0][1].1],
+            [scale_fov[1][0].1, scale_fov[1][1].1],
         ))
     }
     pub fn correct(
@@ -333,54 +298,30 @@ impl StereoCorrection {
             .cloned(),
         )
         .unwrap();
-        // Left side
-        let framebuffer = Framebuffer::new(
-            self.render_pass1.clone(),
-            FramebufferCreateInfo {
-                attachments: vec![ImageView::new(
-                    output.clone(),
-                    ImageViewCreateInfo::from_image(&output),
-                )?],
-                ..Default::default()
-            },
-        )?;
-        let mut render_pass_begin_info = RenderPassBeginInfo::framebuffer(framebuffer);
-        render_pass_begin_info.clear_values = vec![None];
-        cmdbuf
-            .begin_render_pass(render_pass_begin_info, SubpassContents::Inline)?
-            .bind_pipeline_graphics(self.pipeline1.clone())
-            .bind_descriptor_sets(
-                PipelineBindPoint::Graphics,
-                self.pipeline1.layout().clone(),
-                0,
-                self.desc_set1.clone(),
-            )
-            .bind_vertex_buffers(0, vertex_buffer.clone())
-            .draw(vertex_buffer.len() as u32, 1, 0, 0)?
-            .end_render_pass()?;
-        // Right side
-        let image_view_create_info = ImageViewCreateInfo::from_image(&output);
-        let framebuffer = Framebuffer::new(
-            self.render_pass2.clone(),
-            FramebufferCreateInfo {
-                attachments: vec![ImageView::new(output, image_view_create_info)?],
-                ..Default::default()
-            },
-        )?;
-        let mut render_pass_begin_info = RenderPassBeginInfo::framebuffer(framebuffer);
-        render_pass_begin_info.clear_values = vec![None];
-        cmdbuf
-            .begin_render_pass(render_pass_begin_info, SubpassContents::Inline)?
-            .bind_pipeline_graphics(self.pipeline2.clone())
-            .bind_descriptor_sets(
-                PipelineBindPoint::Graphics,
-                self.pipeline2.layout().clone(),
-                0,
-                self.desc_set2.clone(),
-            )
-            .bind_vertex_buffers(0, vertex_buffer.clone())
-            .draw(vertex_buffer.len() as u32, 1, 0, 0)?
-            .end_render_pass()?;
+        for id in 0..2 {
+            let image_view_create_info = ImageViewCreateInfo::from_image(&output);
+            let framebuffer = Framebuffer::new(
+                self.render_passes[id].clone(),
+                FramebufferCreateInfo {
+                    attachments: vec![ImageView::new(output.clone(), image_view_create_info)?],
+                    ..Default::default()
+                },
+            )?;
+            let mut render_pass_begin_info = RenderPassBeginInfo::framebuffer(framebuffer);
+            render_pass_begin_info.clear_values = vec![None];
+            cmdbuf
+                .begin_render_pass(render_pass_begin_info, SubpassContents::Inline)?
+                .bind_pipeline_graphics(self.pipelines[id].clone())
+                .bind_descriptor_sets(
+                    PipelineBindPoint::Graphics,
+                    self.pipelines[id].layout().clone(),
+                    0,
+                    self.desc_sets[id].clone(),
+                )
+                .bind_vertex_buffers(0, vertex_buffer.clone())
+                .draw(vertex_buffer.len() as u32, 1, 0, 0)?
+                .end_render_pass()?;
+        }
         Ok(after.then_execute(queue, cmdbuf.build()?)?)
     }
 }

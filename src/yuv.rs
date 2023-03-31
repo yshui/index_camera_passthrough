@@ -17,7 +17,12 @@ use vulkano::{
     image::{view::ImageViewCreationError, AttachmentImage, ImageUsage},
     memory::allocator::{FastMemoryAllocator, StandardMemoryAllocator},
     pipeline::{
-        graphics::{viewport::Viewport, GraphicsPipelineCreationError},
+        graphics::{
+            input_assembly::{InputAssemblyState, PrimitiveTopology},
+            vertex_input::BuffersDefinition,
+            viewport::{Viewport, ViewportState},
+            GraphicsPipelineCreationError,
+        },
         GraphicsPipeline, Pipeline, PipelineBindPoint,
     },
     render_pass::{
@@ -113,14 +118,18 @@ impl GpuYuyvConverter {
             }
         )?;
         let pipeline = GraphicsPipeline::start()
-            .vertex_input_single_buffer::<Vertex>()
+            .vertex_input_state(BuffersDefinition::new().vertex::<Vertex>())
             .vertex_shader(vs.entry_point("main").unwrap(), ())
-            .triangle_strip()
-            .viewports([Viewport {
-                origin: [0.0, 0.0],
-                dimensions: [w as f32, h as f32],
-                depth_range: -1.0..1.0,
-            }])
+            .input_assembly_state(
+                InputAssemblyState::new().topology(PrimitiveTopology::TriangleStrip),
+            )
+            .viewport_state(ViewportState::viewport_fixed_scissor_irrelevant([
+                Viewport {
+                    origin: [0.0, 0.0],
+                    dimensions: [w as f32, h as f32],
+                    depth_range: -1.0..1.0,
+                },
+            ]))
             .fragment_shader(fs.entry_point("main").unwrap(), ())
             .render_pass(Subpass::from(render_pass.clone(), 0).unwrap())
             .build(device.clone())?;
@@ -144,7 +153,7 @@ impl GpuYuyvConverter {
             },
         )?;
         let desc_set_layout = pipeline.layout().set_layouts().get(0).unwrap();
-        let mut desc_set = PersistentDescriptorSet::new(
+        let desc_set = PersistentDescriptorSet::new(
             descriptor_set_allocator,
             desc_set_layout.clone(),
             [WriteDescriptorSet::image_view_sampler(
@@ -192,7 +201,10 @@ impl GpuYuyvConverter {
             CpuAccessibleBuffer::uninitialized_array(
                 allocator,
                 buf.len() as u64,
-                BufferUsage::empty(),
+                BufferUsage {
+                    transfer_src: true,
+                    ..BufferUsage::empty()
+                },
                 false,
             )
         }?;

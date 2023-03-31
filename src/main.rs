@@ -55,25 +55,6 @@ fn find_index_camera() -> Result<std::path::PathBuf> {
 
 static SPLASH_IMAGE: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/splash.png"));
 
-struct RawImage(Vec<u8>);
-unsafe impl vulkano::buffer::BufferContents for RawImage {
-    fn as_bytes_mut(&mut self) -> &mut [u8] {
-        self.0.as_mut_slice()
-    }
-    fn as_bytes(&self) -> &[u8] {
-        self.0.as_slice()
-    }
-    fn from_bytes(bytes: &[u8]) -> std::result::Result<&Self, bytemuck::PodCastError> {
-        unreachable!()
-    }
-    fn from_bytes_mut(bytes: &mut [u8]) -> std::result::Result<&mut Self, bytemuck::PodCastError> {
-        unreachable!()
-    }
-    fn size_of_element() -> vulkano::DeviceSize {
-        1
-    }
-}
-
 fn load_splash(
     cmdbuf_allocator: &impl CommandBufferAllocator,
     allocator: &impl MemoryAllocator,
@@ -84,20 +65,22 @@ fn load_splash(
         format::Format::*,
         image::AttachmentImage,
     };
-    let img = RawImage(
-        image::load_from_memory_with_format(SPLASH_IMAGE, image::ImageFormat::Png)?
-            .into_rgb8()
-            .into_raw(),
-    );
-    let buffer = CpuAccessibleBuffer::from_data(
-        allocator,
-        BufferUsage {
-            transfer_src: true,
-            ..BufferUsage::empty()
-        },
-        false,
-        img,
-    )?;
+    let img = image::load_from_memory_with_format(SPLASH_IMAGE, image::ImageFormat::Png)?
+        .into_rgba8()
+        .into_raw();
+    let buffer = unsafe {
+        CpuAccessibleBuffer::uninitialized_array(
+            allocator,
+            img.len() as u64,
+            BufferUsage {
+                transfer_src: true,
+                ..BufferUsage::empty()
+            },
+            false,
+        )
+    }?;
+    buffer.write()?.copy_from_slice(&img); // Note: this is UB! but we are waiting for a fix from
+                                           // vulkano upstream
     let mut cmdbuf = AutoCommandBufferBuilder::primary(
         cmdbuf_allocator,
         queue.queue_family_index(),
@@ -108,18 +91,13 @@ fn load_splash(
         [CAMERA_SIZE * 2, CAMERA_SIZE],
         R8G8B8A8_UNORM,
         ImageUsage {
-            transfer_src: false,
             transfer_dst: true,
             sampled: true,
-            storage: false,
             color_attachment: true,
-            depth_stencil_attachment: false,
-            transient_attachment: false,
-            input_attachment: false,
             ..ImageUsage::empty()
         },
     )?;
-    cmdbuf.copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(buffer, output.clone()));
+    cmdbuf.copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(buffer, output.clone()))?;
     cmdbuf
         .build()?
         .execute(queue)?
@@ -131,7 +109,9 @@ fn load_splash(
 fn main() -> Result<()> {
     let cfg = config::load_config()?;
     let mut rd = None;
+    let mut _rdlib = None;
     if cfg.debug {
+        _rdlib = Some(unsafe { libloading::Library::new("librenderdoc.so") }?);
         rd = Some(renderdoc::RenderDoc::<renderdoc::V100>::new()?);
         std::env::set_var("RUST_LOG", "debug");
     }
@@ -185,7 +165,7 @@ fn main() -> Result<()> {
         vrsys.pin_mut().GetOutputDevice(
             &mut target_device,
             openvr_sys::ETextureType::TextureType_Vulkan,
-            std::mem::transmute(instance.handle().as_raw()),
+            instance.handle().as_raw() as *mut _,
         )
     };
 
