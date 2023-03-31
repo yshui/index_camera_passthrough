@@ -165,7 +165,7 @@ fn main() -> Result<()> {
     unsafe {
         vrsys.pin_mut().GetOutputDevice(
             &mut target_device,
-            openvr_sys::ETextureType::TextureType_Vulkan,
+            openvr_sys2::ETextureType::TextureType_Vulkan,
             instance.handle().as_raw() as *mut _,
         )
     };
@@ -227,17 +227,17 @@ fn main() -> Result<()> {
     // Load steam calibration data
     let hmd_id = vrsys.find_hmd().with_context(|| anyhow!("HMD not found"))?;
     let mut serial_number = [0u8; 32];
-    let mut error = openvr_sys::ETrackedPropertyError::TrackedProp_Success;
+    let mut error = openvr_sys2::ETrackedPropertyError::TrackedProp_Success;
     let serial_number_len = unsafe {
         vrsys.pin_mut().GetStringTrackedDeviceProperty(
             hmd_id,
-            openvr_sys::ETrackedDeviceProperty::Prop_SerialNumber_String,
+            openvr_sys2::ETrackedDeviceProperty::Prop_SerialNumber_String,
             serial_number.as_mut_ptr() as *mut _,
             32,
             &mut error,
         )
     };
-    if error != openvr_sys::ETrackedPropertyError::TrackedProp_Success {
+    if error != openvr_sys2::ETrackedPropertyError::TrackedProp_Success {
         return Err(anyhow!("Cannot get HMD's serial number"));
     }
     let lhcfg = steam::load_steam_config(std::str::from_utf8(
@@ -260,7 +260,7 @@ fn main() -> Result<()> {
             .pin_mut()
             .SetOverlayFlag(
                 overlay.as_raw(),
-                openvr_sys::VROverlayFlags::VROverlayFlags_SideBySide_Parallel,
+                openvr_sys2::VROverlayFlags::VROverlayFlags_SideBySide_Parallel,
                 true,
             )
             .into_result()?;
@@ -299,7 +299,7 @@ fn main() -> Result<()> {
         config::DisplayMode::Flat {
             eye: config::Eye::Left,
         } => {
-            let bound = openvr_sys::VRTextureBounds_t {
+            let bound = openvr_sys2::VRTextureBounds_t {
                 uMin: 0.0,
                 uMax: 0.5,
                 vMin: 0.0,
@@ -315,7 +315,7 @@ fn main() -> Result<()> {
         config::DisplayMode::Flat {
             eye: config::Eye::Right,
         } => {
-            let bound = openvr_sys::VRTextureBounds_t {
+            let bound = openvr_sys2::VRTextureBounds_t {
                 uMin: 0.5,
                 uMax: 1.0,
                 vMin: 0.0,
@@ -333,12 +333,12 @@ fn main() -> Result<()> {
     let hmd_transform = vrsys.hmd_transform(0.0);
     let mut overlay_transform: Matrix4<f64> = match cfg.overlay.position {
         config::PositionMode::Absolute { transform } => {
-            let mut transformation = openvr_sys::HmdMatrix34_t { m: [[0.0; 4]; 3] };
+            let mut transformation = openvr_sys2::HmdMatrix34_t { m: [[0.0; 4]; 3] };
             transformation.m[..].copy_from_slice(&transform[..3]);
             unsafe {
                 vroverlay.pin_mut().SetOverlayTransformAbsolute(
                     overlay.as_raw(),
-                    openvr_sys::ETrackingUniverseOrigin::TrackingUniverseStanding,
+                    openvr_sys2::ETrackingUniverseOrigin::TrackingUniverseStanding,
                     &transformation,
                 )
             };
@@ -360,7 +360,7 @@ fn main() -> Result<()> {
     unsafe {
         vroverlay.pin_mut().SetOverlayTransformAbsolute(
             overlay.as_raw(),
-            openvr_sys::ETrackingUniverseOrigin::TrackingUniverseStanding,
+            openvr_sys2::ETrackingUniverseOrigin::TrackingUniverseStanding,
             &(&overlay_transform).into(),
         )
     };
@@ -412,12 +412,12 @@ fn main() -> Result<()> {
     let mut ipd = unsafe {
         vrsys.pin_mut().GetFloatTrackedDeviceProperty(
             0,
-            openvr_sys::ETrackedDeviceProperty::Prop_UserIpdMeters_Float,
+            openvr_sys2::ETrackedDeviceProperty::Prop_UserIpdMeters_Float,
             error.as_mut_ptr(),
         )
     };
     let error = unsafe { error.assume_init() };
-    if error != openvr_sys::ETrackedPropertyError::TrackedProp_Success {
+    if error != openvr_sys2::ETrackedPropertyError::TrackedProp_Success {
         return Err(anyhow!("Cannot get device IPD {:?}", error));
     }
     log::info!("IPD: {}", ipd);
@@ -495,7 +495,7 @@ fn main() -> Result<()> {
                     unsafe {
                         vroverlay.pin_mut().SetOverlayTransformAbsolute(
                             overlay.as_raw(),
-                            openvr_sys::ETrackingUniverseOrigin::TrackingUniverseStanding,
+                            openvr_sys2::ETrackingUniverseOrigin::TrackingUniverseStanding,
                             &(&overlay_transform).into(),
                         )
                     };
@@ -566,27 +566,27 @@ fn main() -> Result<()> {
             )?;
         }
 
-        let mut event = std::mem::MaybeUninit::<openvr_sys::VREvent_t>::uninit();
+        let mut event = std::mem::MaybeUninit::<openvr_sys2::VREvent_t>::uninit();
         // Handle OpenVR events
         while unsafe {
             vrsys.pin_mut().PollNextEvent(
                 event.as_mut_ptr() as *mut _,
-                std::mem::size_of::<openvr_sys::VREvent_t>() as u32,
+                std::mem::size_of::<openvr_sys2::VREvent_t>() as u32,
             )
         } {
             let event = unsafe { event.assume_init_ref() };
             //log::debug!("{:?}", unsafe {
-            //    std::mem::transmute::<_, openvr_sys::EVREventType>(event.eventType)
+            //    std::mem::transmute::<_, openvr_sys2::EVREventType>(event.eventType)
             //});
-            if event.eventType == openvr_sys::EVREventType::VREvent_ButtonPress as u32 {
+            if event.eventType == openvr_sys2::EVREventType::VREvent_ButtonPress as u32 {
                 log::debug!("{:?}", unsafe { event.data.controller.button });
                 if unsafe { event.data.controller.button == 33 } {
                     capture = true;
                 }
-            } else if event.eventType == openvr_sys::EVREventType::VREvent_Quit as u32 {
+            } else if event.eventType == openvr_sys2::EVREventType::VREvent_Quit as u32 {
                 vrsys.pin_mut().AcknowledgeQuit_Exiting();
                 break 'main_loop;
-            } else if event.eventType == openvr_sys::EVREventType::VREvent_IpdChanged as u32 {
+            } else if event.eventType == openvr_sys2::EVREventType::VREvent_IpdChanged as u32 {
                 ipd = unsafe { event.data.ipd.ipdMeters };
                 log::info!("ipd: {}", ipd);
             }

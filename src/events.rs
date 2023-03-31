@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use openvr_sys::EVREventType;
+use openvr_sys2::EVREventType;
 
 pub enum Action {
     None,
@@ -45,10 +45,10 @@ impl State {
             delay,
         }
     }
-    pub fn handle(&mut self, event: &openvr_sys::VREvent_t) {
+    pub fn handle(&mut self, event: &openvr_sys2::VREvent_t) {
         if event.eventType == EVREventType::VREvent_ButtonPress as u32 {
             let button = unsafe { event.data.controller.button };
-            if button == Into::<openvr_sys::EVRButtonId>::into(self.button) as u32 {
+            if button == Into::<openvr_sys2::EVRButtonId>::into(self.button) as u32 {
                 match self.state {
                     InternalState::NoButtonPressed => {
                         self.state = InternalState::OneButtonPressed;
@@ -61,7 +61,7 @@ impl State {
             }
         } else if event.eventType == EVREventType::VREvent_ButtonUnpress as u32 {
             let button = unsafe { event.data.controller.button };
-            if button == Into::<openvr_sys::EVRButtonId>::into(self.button) as u32 {
+            if button == Into::<openvr_sys2::EVRButtonId>::into(self.button) as u32 {
                 match self.state {
                     // Released a button when no button is pressed?
                     InternalState::NoButtonPressed => (),

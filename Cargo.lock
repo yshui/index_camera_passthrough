@@ -901,7 +901,7 @@ dependencies = [
  "libloading",
  "log",
  "nalgebra",
- "openvr_sys",
+ "openvr-sys2",
  "renderdoc",
  "serde",
  "serde_json",
@@ -1341,8 +1341,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b7e5500299e16ebb147ae15a00a942af264cf3688f47923b8fc2cd5858f23ad3"
 
 [[package]]
-name = "openvr_sys"
+name = "openvr-sys2"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ff77b319b1c0711845ad21b99f8b22942789622601a2b231156759ec95aa0f69"
 dependencies = [
  "autocxx",
  "autocxx-build",

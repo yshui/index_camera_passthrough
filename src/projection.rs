@@ -129,11 +129,11 @@ impl Projection {
     ) -> (Matrix4<f32>, Matrix4<f32>) {
         let left_eye: Matrix4<_> = ivrsystem
             .pin_mut()
-            .GetEyeToHeadTransform(openvr_sys::EVREye::Eye_Left)
+            .GetEyeToHeadTransform(openvr_sys2::EVREye::Eye_Left)
             .into();
         let right_eye: Matrix4<_> = ivrsystem
             .pin_mut()
-            .GetEyeToHeadTransform(openvr_sys::EVREye::Eye_Right)
+            .GetEyeToHeadTransform(openvr_sys2::EVREye::Eye_Right)
             .into();
 
         // Camera space to HMD space transform, based on physical measurements

@@ -94,9 +94,9 @@ pub enum Button {
     B,
 }
 
-impl From<Button> for openvr_sys::EVRButtonId {
+impl From<Button> for openvr_sys2::EVRButtonId {
     fn from(b: Button) -> Self {
-        use openvr_sys::EVRButtonId;
+        use openvr_sys2::EVRButtonId;
         match b {
             Button::Menu => EVRButtonId::k_EButton_ApplicationMenu,
             Button::Grip => EVRButtonId::k_EButton_Grip,
