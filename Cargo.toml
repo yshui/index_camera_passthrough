@@ -1,10 +1,11 @@
 [package]
 name = "index_camera_passthrough"
+description = "Camera passthrough for Valve Index on Linux"
+authors = [ "Yuxuan Shui <yshuiv7@gmail.com>" ]
+repository = "https://github.com/yshui/index_camera_passthrough"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 anyhow = "1.0.45"
@@ -32,11 +33,6 @@ humantime-serde = "1.0.1"
 bytemuck = { version = "^1.7", features = ["derive"] }
 libloading = "0.7.4"
 
-[features]
-
 [build-dependencies]
 anyhow = "1.0.45"
 shaderc = "0.8.0"
-
-[patch.crates-io]
-v4l2-sys-mit = { git = "https://github.com/raymanfx/libv4l-rs" }
