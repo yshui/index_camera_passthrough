@@ -27,7 +27,7 @@ impl<'a> VRCompositor<'a> {
     ) -> impl Iterator<Item = &'b std::ffi::CStr> {
         let bytes_needed = unsafe {
             self.pin_mut().GetVulkanDeviceExtensionsRequired(
-                std::mem::transmute(pdev.handle().as_raw()),
+                pdev.handle().as_raw() as *mut _,
                 std::ptr::null_mut(),
                 0,
             )
@@ -35,7 +35,7 @@ impl<'a> VRCompositor<'a> {
         buf.reserve(bytes_needed as usize);
         unsafe {
             self.pin_mut().GetVulkanDeviceExtensionsRequired(
-                std::mem::transmute(pdev.handle().as_raw()),
+                pdev.handle().as_raw() as *mut _,
                 buf.as_mut_ptr() as *mut _,
                 bytes_needed,
             );
@@ -77,16 +77,11 @@ impl VRSystem {
     fn hold_vulkan_device(&self, device: Arc<Device>) {
         self.1.replace(Some(device));
     }
-    #[allow(dead_code)]
     pub fn find_hmd(&self) -> Option<u32> {
-        for i in 0..64 {
-            if self.pin_mut().GetTrackedDeviceClass(i)
+        (0..64).find(|&i| {
+            self.pin_mut().GetTrackedDeviceClass(i)
                 == openvr_sys::ETrackedDeviceClass::TrackedDeviceClass_HMD
-            {
-                return Some(i);
-            }
-        }
-        None
+        })
     }
     pub fn hmd_transform(&self, time_offset: f32) -> nalgebra::Matrix4<f64> {
         let mut hmd_transform = std::mem::MaybeUninit::<openvr_sys::TrackedDevicePose_t>::uninit();
@@ -184,12 +179,10 @@ impl<'a> VROverlayHandle<'a> {
             m_nFormat: image.format() as u32,
             m_nSampleCount: image.samples() as u32,
             m_nImage: image.inner().image.handle().as_raw(),
-            m_pPhysicalDevice: unsafe {
-                std::mem::transmute(dev.physical_device().handle().as_raw())
-            },
-            m_pDevice: unsafe { std::mem::transmute(dev.handle().as_raw()) },
-            m_pQueue: unsafe { std::mem::transmute(queue.handle().as_raw()) },
-            m_pInstance: unsafe { std::mem::transmute(instance.handle().as_raw()) },
+            m_pPhysicalDevice: dev.physical_device().handle().as_raw() as *mut _,
+            m_pDevice: dev.handle().as_raw() as *mut _,
+            m_pQueue: queue.handle().as_raw() as *mut _,
+            m_pInstance: instance.handle().as_raw() as *mut _,
             m_nQueueFamilyIndex: queue.queue_family_index(),
         };
         let vrtexture = openvr_sys::Texture_t {

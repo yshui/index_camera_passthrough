@@ -104,14 +104,14 @@ fn format_matrix<
         "numpy.matrix([{}])",
         m.row_iter()
             .map(|r| {
-                let it: MatrixIter<_, _, _, _> = r.into_iter();
+                let it = r.into_iter();
                 format!("[{}]", it.map(|v| v.to_string()).join(","))
             })
             .join(",")
     )
 }
 
-use nalgebra::{iter::MatrixIter, matrix, Matrix4, RawStorage, Scalar};
+use nalgebra::{matrix, Matrix4, RawStorage, Scalar};
 impl Projection {
     /// Calculate the _physical_ camera's MVP, for each eye.
     /// camera_calib = camera calibration data.
@@ -360,7 +360,7 @@ impl Projection {
             queue.queue_family_index(),
             OneTimeSubmit,
         )?;
-        cmdbuf.copy_image(CopyImageInfo::images(self.source.clone(), output.clone()))?;
+        cmdbuf.copy_image(CopyImageInfo::images(self.source.clone(), output))?;
 
         // Y is flipped from the vertex Y because texture coordinate is top-down
         let vertex_buffer = CpuAccessibleBuffer::<[Vertex]>::from_iter(

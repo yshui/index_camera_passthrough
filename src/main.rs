@@ -1,4 +1,5 @@
 #![feature(try_trait_v2, array_try_map, array_methods)]
+#![deny(rust_2018_idioms)]
 mod config;
 mod distortion_correction;
 mod events;
