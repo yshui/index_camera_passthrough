@@ -40,14 +40,18 @@ mode = "Flat"
 ## only meaningful if mode is "Flat"
 eye = "Left"
 
-## Because your eye and the camera are at different physical locations, it is impossible
+## Because your eyes and the cameras are at different physical locations, it is impossible
 ## to project camera view into VR space perfectly. There are trade offs approximating
-## this projection. (viewing range means things too close to you will give you double vision).
+## this projection.
+##
 ## possible values:
+## (a smaller viewing range here means things too close to you will give you double vision).
+##
 ##   - "FromCamera": in this mode, we assume your eyes are at the cameras' physical location. this mode 
 ##                   has larger viewing range, but everything will look smaller to you.
 ##   - "FromEye":    in this mode, we assume your cameras are at your eyes' physical location. everything will
 ##                   have the right scale in this mode, but the viewing range is smaller.
-## only meaningful if mode is "Stereo"
+##
+## only available if mode is "Stereo"
 # projection_mode = "FromCamera"
 
