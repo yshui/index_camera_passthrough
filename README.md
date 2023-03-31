@@ -29,17 +29,17 @@ _Please_ help me out.
 
 ## Build instruction
 
+You can install this program from crates.io:
+
+```
+cargo install index_camera_passthrough
+```
+
 To build this program, you need:
 
 * Rust ([How to install](https://www.rust-lang.org/tools/install), you need to select the nightly channel)
 * OpenVR
 * Vulkan
-
-Make sure you run
-
-```
-git submodule update --init
-```
 
 in the repository first, then run
 
