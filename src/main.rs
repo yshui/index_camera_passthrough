@@ -16,16 +16,18 @@ use nalgebra::{matrix, Matrix4};
 use openvr::*;
 use v4l::video::Capture;
 use vulkano::{
-    buffer::{BufferUsage, CpuAccessibleBuffer},
+    buffer::{Buffer, BufferCreateInfo, BufferUsage},
     command_buffer::{
         allocator::{CommandBufferAllocator, StandardCommandBufferAllocator},
         CopyBufferToImageInfo, PrimaryCommandBufferAbstract,
     },
     descriptor_set::allocator::StandardDescriptorSetAllocator,
-    device::{self, DeviceCreateInfo, QueueCreateInfo},
+    device::{self, DeviceCreateInfo, QueueCreateInfo, QueueFlags},
     image::ImageUsage,
     instance::{Instance, InstanceCreateInfo, Version},
-    memory::allocator::{FastMemoryAllocator, MemoryAllocator, StandardMemoryAllocator},
+    memory::allocator::{
+        AllocationCreateInfo, MemoryAllocator, MemoryUsage, StandardMemoryAllocator,
+    },
     sync::GpuFuture,
     VulkanLibrary, VulkanObject,
 };
@@ -69,19 +71,20 @@ fn load_splash(
     let img = image::load_from_memory_with_format(SPLASH_IMAGE, image::ImageFormat::Png)?
         .into_rgba8()
         .into_raw();
-    let buffer = unsafe {
-        CpuAccessibleBuffer::uninitialized_array(
-            allocator,
-            img.len() as u64,
-            BufferUsage {
-                transfer_src: true,
-                ..BufferUsage::empty()
-            },
-            false,
-        )
-    }?;
-    buffer.write()?.copy_from_slice(&img); // Note: this is UB! but we are waiting for a fix from
-                                           // vulkano upstream
+    let buffer = Buffer::new_slice::<u8>(
+        allocator,
+        BufferCreateInfo {
+            usage: BufferUsage::TRANSFER_SRC,
+            ..Default::default()
+        },
+        AllocationCreateInfo {
+            usage: MemoryUsage::Upload,
+            allocate_preference: vulkano::memory::allocator::MemoryAllocatePreference::Unknown,
+            ..Default::default()
+        },
+        img.len() as u64,
+    )?;
+    buffer.write()?.copy_from_slice(&img);
     let mut cmdbuf = AutoCommandBufferBuilder::primary(
         cmdbuf_allocator,
         queue.queue_family_index(),
@@ -91,12 +94,7 @@ fn load_splash(
         allocator,
         [CAMERA_SIZE * 2, CAMERA_SIZE],
         R8G8B8A8_UNORM,
-        ImageUsage {
-            transfer_dst: true,
-            sampled: true,
-            color_attachment: true,
-            ..ImageUsage::empty()
-        },
+        ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED | ImageUsage::COLOR_ATTACHMENT,
     )?;
     cmdbuf.copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(buffer, output.clone()))?;
     cmdbuf
@@ -189,7 +187,7 @@ fn main() -> Result<()> {
     let queue_family = device
         .queue_family_properties()
         .iter()
-        .position(|qf| qf.queue_flags.graphics)
+        .position(|qf| qf.queue_flags.contains(QueueFlags::GRAPHICS))
         .with_context(|| anyhow!("Cannot create a suitable queue"))?;
     let (device, mut queues) = {
         let mut buf = Vec::new();
@@ -220,7 +218,7 @@ fn main() -> Result<()> {
     );
     let descriptor_set_allocator = StandardDescriptorSetAllocator::new(device.clone());
     let standard_allocator = StandardMemoryAllocator::new_default(device.clone());
-    let fast_allocator = FastMemoryAllocator::new_default(device.clone());
+    let fast_allocator = StandardMemoryAllocator::new_default(device.clone());
 
     let splash = load_splash(&cmdbuf_allocator, &standard_allocator, queue.clone())?;
 
@@ -272,13 +270,10 @@ fn main() -> Result<()> {
                 &standard_allocator,
                 [CAMERA_SIZE * 2, CAMERA_SIZE],
                 vulkano::format::Format::R8G8B8A8_UNORM,
-                ImageUsage {
-                    transfer_src: true,
-                    transfer_dst: true,
-                    sampled: true,
-                    color_attachment: true,
-                    ..ImageUsage::empty()
-                },
+                ImageUsage::TRANSFER_DST
+                    | ImageUsage::TRANSFER_SRC
+                    | ImageUsage::SAMPLED
+                    | ImageUsage::COLOR_ATTACHMENT,
             )
             .map_err(|e| e.into())
         })
@@ -455,13 +450,10 @@ fn main() -> Result<()> {
                 &fast_allocator,
                 [CAMERA_SIZE * 2, CAMERA_SIZE],
                 vulkano::format::Format::R8G8B8A8_UNORM,
-                vulkano::image::ImageUsage {
-                    transfer_src: true,
-                    transfer_dst: true,
-                    sampled: true,
-                    color_attachment: true,
-                    ..ImageUsage::empty()
-                },
+                ImageUsage::TRANSFER_SRC
+                    | ImageUsage::TRANSFER_DST
+                    | ImageUsage::SAMPLED
+                    | ImageUsage::COLOR_ATTACHMENT,
             )?;
 
             if capture {

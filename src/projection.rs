@@ -12,7 +12,7 @@
 use anyhow::{anyhow, Result};
 use std::sync::Arc;
 use vulkano::{
-    buffer::{BufferContents, BufferUsage, CpuAccessibleBuffer, TypedBufferAccess},
+    buffer::{Buffer, BufferContents, BufferCreateInfo, BufferError, BufferUsage, Subbuffer},
     command_buffer::{
         allocator::StandardCommandBufferAllocator, AutoCommandBufferBuilder,
         CommandBufferUsage::OneTimeSubmit, CopyImageInfo, RenderPassBeginInfo, SubpassContents,
@@ -25,11 +25,14 @@ use vulkano::{
         view::{ImageView, ImageViewCreateInfo},
         AttachmentImage, ImageAccess,
     },
-    memory::allocator::{AllocationCreationError, FastMemoryAllocator, StandardMemoryAllocator},
+    memory::allocator::{
+        AllocationCreateInfo, MemoryAllocatePreference, MemoryUsage,
+        StandardMemoryAllocator,
+    },
     pipeline::{
         graphics::{
             input_assembly::{InputAssemblyState, PrimitiveTopology},
-            vertex_input::BuffersDefinition,
+            vertex_input::Vertex as VertexTrait,
             viewport::{Viewport, ViewportState},
         },
         GraphicsPipeline, Pipeline, PipelineBindPoint,
@@ -42,9 +45,7 @@ mod vs {
     vulkano_shaders::shader! {
         ty: "vertex",
         path: "shaders/projection.vert",
-        types_meta: {
-            #[derive(::bytemuck::Zeroable, ::bytemuck::Pod, Copy, Clone, Debug)]
-        },
+        custom_derives: [Copy, Clone, Debug, Default],
     }
 }
 
@@ -52,9 +53,7 @@ mod fs {
     vulkano_shaders::shader! {
         ty: "fragment",
         path: "shaders/projection.frag",
-        types_meta: {
-            #[derive(::bytemuck::Zeroable, ::bytemuck::Pod, Copy, Clone, Debug)]
-        },
+        custom_derives: [Copy, Clone, Debug],
     }
 }
 
@@ -69,7 +68,7 @@ pub struct ProjectionParameters {
 }
 
 struct Uniforms {
-    transforms: [Arc<CpuAccessibleBuffer<vs::ty::Transform>>; 2],
+    transforms: [Subbuffer<vs::Transform>; 2],
 }
 
 pub struct Projection {
@@ -82,13 +81,14 @@ pub struct Projection {
     desc_sets: [Arc<PersistentDescriptorSet>; 2],
 }
 use crate::config::ProjectionMode;
-#[derive(Default, Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(VertexTrait, Default, Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 struct Vertex {
+    #[format(R32G32_SFLOAT)]
     position: [f32; 2],
+    #[format(R32G32B32_SFLOAT)]
     in_tex_coord: [f32; 3],
 }
-vulkano::impl_vertex!(Vertex, position, in_tex_coord);
 
 #[allow(dead_code)]
 fn format_matrix<
@@ -223,23 +223,27 @@ impl Projection {
 
         if overlay_width != &self.saved_parameters.overlay_width {
             self.saved_parameters.overlay_width = *overlay_width;
-            transforms_write[0].overlayWidth = *overlay_width;
-            transforms_write[1].overlayWidth = *overlay_width;
+            transforms_write[0].overlayWidth = (*overlay_width).into();
+            transforms_write[1].overlayWidth = (*overlay_width).into();
         }
         Ok(())
     }
     fn make_uniform_buffer<T: BufferContents>(
         allocator: &StandardMemoryAllocator,
         uniform: T,
-    ) -> Result<Arc<CpuAccessibleBuffer<T>>, AllocationCreationError> {
+    ) -> Result<Subbuffer<T>, BufferError> {
         log::debug!("uniform buffer size {}", std::mem::size_of::<T>());
-        CpuAccessibleBuffer::from_data(
+        Buffer::from_data(
             allocator,
-            BufferUsage {
-                uniform_buffer: true,
-                ..BufferUsage::empty()
+            BufferCreateInfo {
+                usage: BufferUsage::UNIFORM_BUFFER,
+                ..Default::default()
             },
-            false,
+            AllocationCreateInfo {
+                usage: MemoryUsage::Upload,
+                allocate_preference: MemoryAllocatePreference::Unknown,
+                ..Default::default()
+            },
             uniform,
         )
     }
@@ -272,18 +276,18 @@ impl Projection {
         )
         .unwrap();
         let tex_offsets = [
-            fs::ty::Info {
+            fs::Info {
                 texOffset: [0.0, 0.0],
             },
-            fs::ty::Info {
+            fs::Info {
                 texOffset: [0.5, 0.0],
             },
         ]
         .try_map(|u| Self::make_uniform_buffer(allocator, u))?;
-        let transforms = [bytemuck::Zeroable::zeroed(); 2]
+        let transforms = [vs::Transform::default(); 2]
             .try_map(|u| Self::make_uniform_buffer(allocator, u))?;
         let pipeline = GraphicsPipeline::start()
-            .vertex_input_state(BuffersDefinition::new().vertex::<Vertex>())
+            .vertex_input_state(Vertex::per_vertex())
             .vertex_shader(vs.entry_point("main").unwrap(), ())
             .input_assembly_state(
                 InputAssemblyState::new().topology(PrimitiveTopology::TriangleStrip),
@@ -335,7 +339,7 @@ impl Projection {
     }
     pub fn project(
         &mut self,
-        allocator: &FastMemoryAllocator,
+        allocator: &StandardMemoryAllocator,
         cmdbuf_allocator: &StandardCommandBufferAllocator,
         after: impl GpuFuture,
         queue: Arc<Queue>,
@@ -363,13 +367,17 @@ impl Projection {
         cmdbuf.copy_image(CopyImageInfo::images(self.source.clone(), output))?;
 
         // Y is flipped from the vertex Y because texture coordinate is top-down
-        let vertex_buffer = CpuAccessibleBuffer::<[Vertex]>::from_iter(
+        let vertex_buffer = Buffer::from_iter::<Vertex, _>(
             allocator,
-            BufferUsage {
-                vertex_buffer: true,
-                ..BufferUsage::empty()
+            BufferCreateInfo {
+                usage: BufferUsage::VERTEX_BUFFER,
+                ..Default::default()
             },
-            false,
+            AllocationCreateInfo {
+                usage: MemoryUsage::Upload,
+                allocate_preference: MemoryAllocatePreference::Unknown,
+                ..Default::default()
+            },
             [
                 Vertex {
                     position: [-1.0, -1.0],

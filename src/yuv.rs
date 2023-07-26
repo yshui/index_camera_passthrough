@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use std::sync::Arc;
 use vulkano::{
-    buffer::{BufferUsage, CpuAccessibleBuffer, TypedBufferAccess},
+    buffer::{Buffer, BufferCreateInfo, BufferUsage},
     command_buffer::SubpassContents,
     command_buffer::{
         allocator::StandardCommandBufferAllocator, AutoCommandBufferBuilder,
@@ -15,11 +15,11 @@ use vulkano::{
     format::Format::R8G8B8A8_UNORM,
     image::view::{ImageView, ImageViewCreateInfo},
     image::{view::ImageViewCreationError, AttachmentImage, ImageUsage},
-    memory::allocator::{FastMemoryAllocator, StandardMemoryAllocator},
+    memory::allocator::{MemoryAllocatePreference, MemoryUsage, StandardMemoryAllocator, AllocationCreateInfo},
     pipeline::{
         graphics::{
             input_assembly::{InputAssemblyState, PrimitiveTopology},
-            vertex_input::BuffersDefinition,
+            vertex_input::Vertex as VertexTrait,
             viewport::{Viewport, ViewportState},
             GraphicsPipelineCreationError,
         },
@@ -52,12 +52,12 @@ mod fs {
     }
 }
 
-#[derive(Default, Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(VertexTrait, Default, Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 struct Vertex {
+    #[format(R32G32_SFLOAT)]
     position: [f32; 2],
 }
-vulkano::impl_vertex!(Vertex, position);
 
 #[derive(thiserror::Error, Debug)]
 pub enum ConverterError {
@@ -118,7 +118,7 @@ impl GpuYuyvConverter {
             }
         )?;
         let pipeline = GraphicsPipeline::start()
-            .vertex_input_state(BuffersDefinition::new().vertex::<Vertex>())
+            .vertex_input_state(Vertex::per_vertex())
             .vertex_shader(vs.entry_point("main").unwrap(), ())
             .input_assembly_state(
                 InputAssemblyState::new().topology(PrimitiveTopology::TriangleStrip),
@@ -137,12 +137,7 @@ impl GpuYuyvConverter {
             allocator,
             [w / 2, h], // 1 pixel of YUYV = 2 pixels of RGB
             R8G8B8A8_UNORM,
-            ImageUsage {
-                transfer_dst: true,
-                sampled: true,
-                color_attachment: true,
-                ..ImageUsage::empty()
-            },
+            ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED | ImageUsage::COLOR_ATTACHMENT,
         )?;
         let sampler = Sampler::new(
             device.clone(),
@@ -178,7 +173,7 @@ impl GpuYuyvConverter {
     /// calling this function again.
     pub fn yuyv_buffer_to_vulkan_image(
         &self,
-        allocator: &FastMemoryAllocator,
+        allocator: &StandardMemoryAllocator,
         cmdbuf_allocator: &StandardCommandBufferAllocator,
         buf: &[u8],
         after: impl GpuFuture,
@@ -197,17 +192,19 @@ impl GpuYuyvConverter {
             }
         }
         // Submit the source image to GPU
-        let subbuffer = unsafe {
-            CpuAccessibleBuffer::uninitialized_array(
-                allocator,
-                buf.len() as u64,
-                BufferUsage {
-                    transfer_src: true,
-                    ..BufferUsage::empty()
-                },
-                false,
-            )
-        }?;
+        let subbuffer = Buffer::new_slice(
+            allocator,
+            BufferCreateInfo {
+                usage: BufferUsage::TRANSFER_SRC,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                usage: MemoryUsage::Upload,
+                allocate_preference: MemoryAllocatePreference::Unknown,
+                ..Default::default()
+            },
+            buf.len() as u64,
+        )?;
         subbuffer.write()?.copy_from_slice(buf);
         let mut cmdbuf = AutoCommandBufferBuilder::primary(
             cmdbuf_allocator,
@@ -219,13 +216,17 @@ impl GpuYuyvConverter {
             self.src.clone(),
         ))?;
         // Build a pipeline to do yuyv -> rgb
-        let vertex_buffer = CpuAccessibleBuffer::<[Vertex]>::from_iter(
+        let vertex_buffer = Buffer::from_iter::<Vertex, _>(
             allocator,
-            BufferUsage {
-                vertex_buffer: true,
-                ..BufferUsage::empty()
+            BufferCreateInfo {
+                usage: BufferUsage::VERTEX_BUFFER,
+                ..Default::default()
             },
-            false,
+            AllocationCreateInfo {
+                usage: MemoryUsage::Upload,
+                allocate_preference: MemoryAllocatePreference::Unknown,
+                ..Default::default()
+            },
             [
                 Vertex {
                     position: [-1.0, -1.0],

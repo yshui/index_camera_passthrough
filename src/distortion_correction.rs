@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use log::{info, trace};
 use std::sync::Arc;
 use vulkano::{
-    buffer::{BufferUsage, CpuAccessibleBuffer, TypedBufferAccess},
+    buffer::{Buffer, BufferCreateInfo, BufferUsage},
     command_buffer::{
         allocator::StandardCommandBufferAllocator, AutoCommandBufferBuilder,
         CommandBufferUsage::OneTimeSubmit, RenderPassBeginInfo, SubpassContents,
@@ -15,12 +15,14 @@ use vulkano::{
         view::{ImageView, ImageViewCreateInfo},
         AttachmentImage, ImageAccess,
     },
-    memory::allocator::{FastMemoryAllocator, StandardMemoryAllocator},
+    memory::allocator::{
+        AllocationCreateInfo, MemoryAllocatePreference, MemoryUsage, StandardMemoryAllocator,
+    },
     pipeline::{graphics::viewport::Viewport, PipelineBindPoint},
     pipeline::{
         graphics::{
             input_assembly::{InputAssemblyState, PrimitiveTopology},
-            vertex_input::BuffersDefinition,
+            vertex_input::Vertex as VertexTrait,
             viewport::ViewportState,
         },
         GraphicsPipeline, Pipeline,
@@ -30,14 +32,15 @@ use vulkano::{
     sync::GpuFuture,
 };
 
-#[derive(Default, Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(VertexTrait, Default, Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 #[allow(non_snake_case)]
 #[repr(C)]
 struct Vertex {
+    #[format(R32G32_SFLOAT)]
     position: [f32; 2],
+    #[format(R32G32_SFLOAT)]
     inCoord: [f32; 2],
 }
-vulkano::impl_vertex!(Vertex, position, inCoord);
 
 /// Lens correction for a stereo side-by-side image
 pub struct StereoCorrection {
@@ -169,7 +172,7 @@ impl StereoCorrection {
         ];
         let pipelines = [0, 1].try_map(|id| {
             GraphicsPipeline::start()
-                .vertex_input_state(BuffersDefinition::new().vertex::<Vertex>())
+                .vertex_input_state(Vertex::per_vertex())
                 .vertex_shader(vs.entry_point("main").unwrap(), ())
                 .input_assembly_state(
                     InputAssemblyState::new().topology(PrimitiveTopology::TriangleStrip),
@@ -203,22 +206,25 @@ impl StereoCorrection {
             .map(|(_, coeff, center, focal)| Self::find_scale(coeff, center, focal));
         // Left pass
         let desc_sets = coeffs.try_map(|(id, coeff, center, focal)| {
-            let uniform = fs::ty::Parameters {
+            let uniform = fs::Parameters {
                 center: center.map(|x| x as f32),
                 dcoef: coeff.map(|x| x as f32),
                 focal: focal.map(|x| x as f32),
-                sensorSize: size as f32,
+                sensorSize: (size as f32).into(),
                 scale: [scale_fov[id][0].0 as f32, scale_fov[id][1].0 as f32],
                 texOffset: [0.5 * id as f32, 0.0],
-                _dummy0: Default::default(),
             };
-            let uniform = CpuAccessibleBuffer::from_data(
+            let uniform = Buffer::from_data(
                 allocator,
-                BufferUsage {
-                    uniform_buffer: true,
-                    ..BufferUsage::empty()
+                BufferCreateInfo {
+                    usage: BufferUsage::UNIFORM_BUFFER,
+                    ..Default::default()
                 },
-                false,
+                AllocationCreateInfo {
+                    usage: MemoryUsage::Upload,
+                    allocate_preference: MemoryAllocatePreference::Unknown,
+                    ..Default::default()
+                },
                 uniform,
             )?;
             let desc_set_layout = pipelines[id].layout().set_layouts().get(0).unwrap();
@@ -250,7 +256,7 @@ impl StereoCorrection {
     pub fn correct(
         &self,
         cmdbuf_allocator: &StandardCommandBufferAllocator,
-        allocator: &FastMemoryAllocator,
+        allocator: &StandardMemoryAllocator,
         after: impl GpuFuture,
         queue: Arc<Queue>,
         output: Arc<AttachmentImage>,
@@ -269,13 +275,17 @@ impl StereoCorrection {
             queue.queue_family_index(),
             OneTimeSubmit,
         )?;
-        let vertex_buffer = CpuAccessibleBuffer::<[Vertex]>::from_iter(
+        let vertex_buffer = Buffer::from_iter::<Vertex, _>(
             allocator,
-            BufferUsage {
-                vertex_buffer: true,
-                ..BufferUsage::empty()
+            BufferCreateInfo {
+                usage: BufferUsage::VERTEX_BUFFER,
+                ..Default::default()
             },
-            false,
+            AllocationCreateInfo {
+                usage: MemoryUsage::Upload,
+                allocate_preference: MemoryAllocatePreference::Unknown,
+                ..Default::default()
+            },
             [
                 Vertex {
                     position: [-1.0, -1.0],
@@ -344,8 +354,6 @@ mod fs {
     vulkano_shaders::shader! {
         ty: "fragment",
         path: "shaders/stereo_correction.frag",
-        types_meta: {
-            #[derive(::bytemuck::Pod, ::bytemuck::Zeroable, Copy, Clone, Debug)]
-        },
+        custom_derives: [Copy, Clone, Debug],
     }
 }
