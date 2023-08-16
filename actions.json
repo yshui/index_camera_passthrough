@@ -1,0 +1,39 @@
+{
+  "default_bindings": [
+   {
+      "controller_type": "knuckles"
+   }
+  ],
+  "actions": [
+    {
+      "name": "/actions/main/in/button1",
+      "requirement": "mandatory",
+      "type": "boolean"
+    },
+    {
+      "name": "/actions/main/in/button2",
+      "type": "boolean",
+      "requirement": "mandatory"
+    },
+    {
+      "name": "/actions/main/in/debug",
+      "type": "boolean"
+    }
+  ],
+  "action_sets": [
+    {
+      "name": "/actions/main",
+      "usage": "leftright"
+    }
+  ],
+  "localization" : [
+   {
+       "language_tag": "en_us",
+
+        "/actions/main" : "Bindings",
+        "/actions/main/in/button1" : "Button 1",
+        "/actions/main/in/button2" : "Button 2",
+        "/actions/main/in/debug" : "Debug"
+    }
+  ]
+}

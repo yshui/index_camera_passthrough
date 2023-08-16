@@ -48,9 +48,14 @@ pub struct StereoCorrection {
     render_passes: [Arc<RenderPass>; 2],
     pipelines: [Arc<GraphicsPipeline>; 2],
     desc_sets: [Arc<PersistentDescriptorSet>; 2],
+    /// field-of-view parameter, 0 = left eye, 1 = right eye
+    fov: [[f64; 2]; 2],
 }
 
 impl StereoCorrection {
+    pub fn fov(&self) -> [[f64; 2]; 2] {
+        self.fov
+    }
     /// i.e. solving Undistort(src) = dst for the smallest non-zero root.
     fn undistort_inverse(coeff: &[f64; 4], dst: f64) -> Option<f64> {
         // solving: x * (1 + k1*x^2 + k2*x^4 + k3*x^6 + k4*x^8) - dst = 0
@@ -114,8 +119,8 @@ impl StereoCorrection {
         allocator: &StandardMemoryAllocator,
         descriptor_set_allocator: &StandardDescriptorSetAllocator,
         input: Arc<AttachmentImage>,
-        camera_calib: &crate::steam::StereoCamera,
-    ) -> Result<(Self, [f64; 2], [f64; 2])> {
+        camera_calib: &crate::vrapi::StereoCamera,
+    ) -> Result<Self> {
         if input.dimensions().width() != input.dimensions().height() * 2 {
             return Err(anyhow!("Input not square"));
         }
@@ -242,16 +247,16 @@ impl StereoCorrection {
             )?)
         })?;
 
-        Ok((
-            Self {
-                device,
-                render_passes,
-                pipelines,
-                desc_sets,
-            },
-            [scale_fov[0][0].1, scale_fov[0][1].1],
-            [scale_fov[1][0].1, scale_fov[1][1].1],
-        ))
+        Ok(Self {
+            device,
+            render_passes,
+            pipelines,
+            desc_sets,
+            fov: [
+                [scale_fov[0][0].1, scale_fov[0][1].1],
+                [scale_fov[1][0].1, scale_fov[1][1].1],
+            ],
+        })
     }
     pub fn correct(
         &self,

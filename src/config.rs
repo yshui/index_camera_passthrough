@@ -43,7 +43,7 @@ impl Default for PositionMode {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Eq, PartialEq, Clone, Copy)]
 pub enum Eye {
     Left,
     Right,
@@ -103,6 +103,24 @@ impl From<Button> for openvr_sys2::EVRButtonId {
             Button::Trigger => EVRButtonId::k_EButton_Axis1,
             Button::A => EVRButtonId::k_EButton_Grip,
             Button::B => EVRButtonId::k_EButton_ApplicationMenu,
+        }
+    }
+}
+
+impl PartialEq<openvr_sys2::EVRButtonId> for Button {
+    fn eq(&self, other: &openvr_sys2::EVRButtonId) -> bool {
+        openvr_sys2::EVRButtonId::from(*self) == *other
+    }
+}
+
+impl From<openvr_sys2::EVRButtonId> for Button {
+    fn from(value: openvr_sys2::EVRButtonId) -> Self {
+        use openvr_sys2::EVRButtonId;
+        match value {
+            EVRButtonId::k_EButton_ApplicationMenu => Button::Menu,
+            EVRButtonId::k_EButton_Grip => Button::Grip,
+            EVRButtonId::k_EButton_Axis1 => Button::Trigger,
+            _ => panic!("unknown button id"),
         }
     }
 }

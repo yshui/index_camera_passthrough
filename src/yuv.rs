@@ -5,16 +5,15 @@ use vulkano::{
     command_buffer::SubpassContents,
     command_buffer::{
         allocator::StandardCommandBufferAllocator, AutoCommandBufferBuilder,
-        CommandBufferUsage::OneTimeSubmit, CopyBufferToImageInfo, RenderPassBeginInfo,
+        CommandBufferUsage::OneTimeSubmit, RenderPassBeginInfo,
     },
     descriptor_set::{
         allocator::StandardDescriptorSetAllocator, persistent::PersistentDescriptorSet,
         WriteDescriptorSet,
     },
     device::{Device, DeviceOwned, Queue},
-    format::Format::R8G8B8A8_UNORM,
     image::view::{ImageView, ImageViewCreateInfo},
-    image::{view::ImageViewCreationError, AttachmentImage, ImageUsage},
+    image::{view::ImageViewCreationError, AttachmentImage},
     memory::allocator::{MemoryAllocatePreference, MemoryUsage, StandardMemoryAllocator, AllocationCreateInfo},
     pipeline::{
         graphics::{
@@ -83,7 +82,6 @@ pub struct GpuYuyvConverter {
     device: Arc<Device>,
     render_pass: Arc<RenderPass>,
     pipeline: Arc<GraphicsPipeline>,
-    src: Arc<AttachmentImage>,
     desc_set: Arc<PersistentDescriptorSet>,
 }
 
@@ -93,10 +91,10 @@ pub struct GpuYuyvConverter {
 impl GpuYuyvConverter {
     pub fn new(
         device: Arc<Device>,
-        allocator: &StandardMemoryAllocator,
         descriptor_set_allocator: &StandardDescriptorSetAllocator,
         w: u32,
         h: u32,
+        input: Arc<AttachmentImage>
     ) -> Result<Self> {
         if w % 2 != 0 {
             return Err(anyhow!("Width can't be odd"));
@@ -133,12 +131,6 @@ impl GpuYuyvConverter {
             .fragment_shader(fs.entry_point("main").unwrap(), ())
             .render_pass(Subpass::from(render_pass.clone(), 0).unwrap())
             .build(device.clone())?;
-        let src = AttachmentImage::with_usage(
-            allocator,
-            [w / 2, h], // 1 pixel of YUYV = 2 pixels of RGB
-            R8G8B8A8_UNORM,
-            ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED | ImageUsage::COLOR_ATTACHMENT,
-        )?;
         let sampler = Sampler::new(
             device.clone(),
             SamplerCreateInfo {
@@ -153,12 +145,11 @@ impl GpuYuyvConverter {
             desc_set_layout.clone(),
             [WriteDescriptorSet::image_view_sampler(
                 0,
-                ImageView::new(src.clone(), ImageViewCreateInfo::from_image(&src))?,
+                ImageView::new(input.clone(), ImageViewCreateInfo::from_image(&input))?,
                 sampler,
             )],
         )?;
         Ok(Self {
-            src,
             render_pass,
             pipeline,
             device,
@@ -175,7 +166,6 @@ impl GpuYuyvConverter {
         &self,
         allocator: &StandardMemoryAllocator,
         cmdbuf_allocator: &StandardCommandBufferAllocator,
-        buf: &[u8],
         after: impl GpuFuture,
         queue: Arc<Queue>,
         output: Arc<AttachmentImage>,
@@ -191,30 +181,11 @@ impl GpuYuyvConverter {
                 return Err(anyhow!("Queue mismatch"));
             }
         }
-        // Submit the source image to GPU
-        let subbuffer = Buffer::new_slice(
-            allocator,
-            BufferCreateInfo {
-                usage: BufferUsage::TRANSFER_SRC,
-                ..Default::default()
-            },
-            AllocationCreateInfo {
-                usage: MemoryUsage::Upload,
-                allocate_preference: MemoryAllocatePreference::Unknown,
-                ..Default::default()
-            },
-            buf.len() as u64,
-        )?;
-        subbuffer.write()?.copy_from_slice(buf);
         let mut cmdbuf = AutoCommandBufferBuilder::primary(
             cmdbuf_allocator,
             queue.queue_family_index(),
             OneTimeSubmit,
         )?;
-        cmdbuf.copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(
-            subbuffer,
-            self.src.clone(),
-        ))?;
         // Build a pipeline to do yuyv -> rgb
         let vertex_buffer = Buffer::from_iter::<Vertex, _>(
             allocator,

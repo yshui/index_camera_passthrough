@@ -1,12 +1,11 @@
 use anyhow::{anyhow, Result};
+use openvr_sys2::{EVRInitError, EVROverlayError};
 use std::cell::Cell;
 use std::sync::Arc;
 /// Incomplete set of OpenVR wrappeprs.
 use std::{marker::PhantomData, pin::Pin};
 use vulkano::{
-    device::{physical::PhysicalDevice, Device, Queue},
-    image::ImageAccess,
-    instance::Instance,
+    device::{physical::PhysicalDevice, Device},
     Handle, VulkanObject,
 };
 
@@ -56,7 +55,7 @@ impl<'a> VRCompositor<'a> {
 }
 
 impl VRSystem {
-    pub fn init() -> Result<Self> {
+    pub fn init() -> Result<Self, EVRInitError> {
         let mut error = openvr_sys2::EVRInitError::VRInitError_None;
         let isystem_raw = unsafe {
             openvr_sys2::VR_Init(
@@ -74,7 +73,7 @@ impl VRSystem {
     pub fn compositor(&self) -> VRCompositor<'_> {
         VRCompositor(openvr_sys2::VRCompositor(), PhantomData)
     }
-    fn hold_vulkan_device(&self, device: Arc<Device>) {
+    pub fn hold_vulkan_device(&self, device: Arc<Device>) {
         self.1.replace(Some(device));
     }
     pub fn find_hmd(&self) -> Option<u32> {
@@ -106,9 +105,13 @@ impl<'a> VROverlay<'a> {
     pub fn pin_mut(&self) -> Pin<&mut openvr_sys2::IVROverlay> {
         unsafe { Pin::new_unchecked(&mut *self.0) }
     }
-    pub fn create_overlay(&'a self, key: &'a str, name: &'a str) -> Result<VROverlayHandle<'a>> {
+    pub fn create_overlay(
+        &'a self,
+        key: &'a str,
+        name: &'a str,
+    ) -> Result<openvr_sys2::VROverlayHandle_t, EVROverlayError> {
         if !key.contains('\0') || !name.contains('\0') {
-            return Err(anyhow!("key and name must both contain a NUL byte"));
+            return Err(EVROverlayError::VROverlayError_InvalidParameter);
         }
         let mut overlayhandle = std::mem::MaybeUninit::<openvr_sys2::VROverlayHandle_t>::uninit();
         unsafe {
@@ -119,91 +122,18 @@ impl<'a> VROverlay<'a> {
             )
         }
         .into_result()?;
-        Ok(VROverlayHandle {
-            raw: unsafe { overlayhandle.assume_init() },
-            ivr_overlay: self,
-            texture: None,
-        })
+        Ok(unsafe { overlayhandle.assume_init() })
     }
     /// Safety: could destroy an overlay that is still owned by a VROverlayHandle.
-    unsafe fn destroy_overlay_raw(&self, overlay: openvr_sys2::VROverlayHandle_t) -> Result<()> {
+    pub unsafe fn destroy_overlay_raw(
+        &self,
+        overlay: openvr_sys2::VROverlayHandle_t,
+    ) -> Result<()> {
         let error = self.pin_mut().DestroyOverlay(overlay);
         if error != openvr_sys2::EVROverlayError::VROverlayError_None {
             Err(anyhow!("Failed to destroy overlay {:?}", error))
         } else {
             Ok(())
-        }
-    }
-}
-
-struct TextureState {
-    _image: Arc<dyn vulkano::image::ImageAccess>,
-    _device: Arc<Device>,
-    _queue: Arc<Queue>,
-    _instance: Arc<Instance>,
-}
-pub struct VROverlayHandle<'a> {
-    raw: openvr_sys2::VROverlayHandle_t,
-    ivr_overlay: &'a VROverlay<'a>,
-
-    /// Used to hold references to vulkan objects so they don't die.
-    texture: Option<TextureState>,
-}
-
-impl<'a> VROverlayHandle<'a> {
-    pub fn as_raw(&self) -> openvr_sys2::VROverlayHandle_t {
-        self.raw
-    }
-    pub fn set_texture(
-        &mut self,
-        w: u32,
-        h: u32,
-        image: Arc<impl vulkano::image::ImageAccess + 'static>,
-        dev: Arc<Device>,
-        queue: Arc<Queue>,
-        instance: Arc<Instance>,
-    ) -> Result<(), openvr_sys2::EVROverlayError> {
-        let texture = TextureState {
-            _image: image.clone() as Arc<_>,
-            _device: dev.clone(),
-            _queue: queue.clone(),
-            _instance: instance.clone(),
-        };
-        self.texture.replace(texture);
-        // Once we set a texture, the VRSystem starts to depend on Vulkan
-        // instance being alive.
-        self.ivr_overlay.1.hold_vulkan_device(dev.clone());
-        let mut vrimage = openvr_sys2::VRVulkanTextureData_t {
-            m_nWidth: w,
-            m_nHeight: h,
-            m_nFormat: image.format() as u32,
-            m_nSampleCount: image.samples() as u32,
-            m_nImage: image.inner().image.handle().as_raw(),
-            m_pPhysicalDevice: dev.physical_device().handle().as_raw() as *mut _,
-            m_pDevice: dev.handle().as_raw() as *mut _,
-            m_pQueue: queue.handle().as_raw() as *mut _,
-            m_pInstance: instance.handle().as_raw() as *mut _,
-            m_nQueueFamilyIndex: queue.queue_family_index(),
-        };
-        let vrtexture = openvr_sys2::Texture_t {
-            handle: &mut vrimage as *mut _ as *mut std::ffi::c_void,
-            eType: openvr_sys2::ETextureType::TextureType_Vulkan,
-            eColorSpace: openvr_sys2::EColorSpace::ColorSpace_Auto,
-        };
-        unsafe {
-            self.ivr_overlay
-                .pin_mut()
-                .SetOverlayTexture(self.as_raw(), &vrtexture)
-                .into_result()
-        }
-    }
-}
-
-impl<'a> Drop for VROverlayHandle<'a> {
-    fn drop(&mut self) {
-        log::info!("Dropping overlay handle");
-        if let Err(e) = unsafe { self.ivr_overlay.destroy_overlay_raw(self.raw) } {
-            eprintln!("{}", e);
         }
     }
 }

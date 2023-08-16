@@ -18,7 +18,8 @@ use vulkano::{
         CommandBufferUsage::OneTimeSubmit, CopyImageInfo, RenderPassBeginInfo, SubpassContents,
     },
     descriptor_set::{
-        allocator::StandardDescriptorSetAllocator, PersistentDescriptorSet, WriteDescriptorSet,
+        allocator::{DescriptorSetAlloc, DescriptorSetAllocator},
+        PersistentDescriptorSet, WriteDescriptorSet,
     },
     device::{Device, Queue},
     image::{
@@ -26,8 +27,7 @@ use vulkano::{
         AttachmentImage, ImageAccess,
     },
     memory::allocator::{
-        AllocationCreateInfo, MemoryAllocatePreference, MemoryUsage,
-        StandardMemoryAllocator,
+        AllocationCreateInfo, MemoryAllocatePreference, MemoryUsage, StandardMemoryAllocator,
     },
     pipeline::{
         graphics::{
@@ -63,7 +63,7 @@ pub struct ProjectionParameters {
     pub overlay_width: f32,
     /// MVP matrices for the left and right eye, respectively.
     pub mvps: [Matrix4<f32>; 2],
-    pub camera_calib: crate::steam::StereoCamera,
+    pub camera_calib: Option<crate::vrapi::StereoCamera>,
     pub mode: ProjectionMode,
 }
 
@@ -71,14 +71,14 @@ struct Uniforms {
     transforms: [Subbuffer<vs::Transform>; 2],
 }
 
-pub struct Projection {
+pub struct Projection<T> {
     source: Arc<AttachmentImage>,
     pipeline: Arc<GraphicsPipeline>,
     render_pass: Arc<RenderPass>,
     // [0: left, 1: right]
     uniforms: Uniforms,
     saved_parameters: ProjectionParameters,
-    desc_sets: [Arc<PersistentDescriptorSet>; 2],
+    desc_sets: [Arc<PersistentDescriptorSet<T>>; 2],
 }
 use crate::config::ProjectionMode;
 #[derive(VertexTrait, Default, Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -112,46 +112,46 @@ fn format_matrix<
 }
 
 use nalgebra::{matrix, Matrix4, RawStorage, Scalar};
-impl Projection {
+impl<DSA: DescriptorSetAlloc + 'static> Projection<DSA> {
     /// Calculate the _physical_ camera's MVP, for each eye.
     /// camera_calib = camera calibration data.
     /// fov_left/right = adjusted fovs, in ratio (not in pixels)
     /// frame_time = how long after the first frame is the current frame taken
     /// time_origin = instant when the first frame is taken
-    pub fn calculate_mvp(
+    pub(crate) fn calculate_mvp(
         &self,
         mode: ProjectionMode,
         overlay_transform: &Matrix4<f64>,
-        camera_calib: &crate::steam::StereoCamera,
-        (fov_left, fov_right): (&[f64; 2], &[f64; 2]),
-        ivrsystem: &crate::openvr::VRSystem,
+        camera_calib: &Option<crate::vrapi::StereoCamera>,
+        fov: &[[f64; 2]; 2],
+        eye_to_head: &[Matrix4<f64>; 2],
         hmd_transform: &Matrix4<f64>,
     ) -> (Matrix4<f32>, Matrix4<f32>) {
-        let left_eye: Matrix4<_> = ivrsystem
-            .pin_mut()
-            .GetEyeToHeadTransform(openvr_sys2::EVREye::Eye_Left)
-            .into();
-        let right_eye: Matrix4<_> = ivrsystem
-            .pin_mut()
-            .GetEyeToHeadTransform(openvr_sys2::EVREye::Eye_Right)
-            .into();
-
+        let left_extrinsics_position = camera_calib
+            .map(|c| c.left.extrinsics.position)
+            .unwrap_or_default();
         // Camera space to HMD space transform, based on physical measurements
         let left_cam: Matrix4<_> = matrix![
-            1.0, 0.0, 0.0, -camera_calib.left.extrinsics.position[0];
-            0.0, 1.0, 0.0, -camera_calib.left.extrinsics.position[1];
-            0.0, 0.0, 1.0, -camera_calib.left.extrinsics.position[2];
+            1.0, 0.0, 0.0, -left_extrinsics_position[0];
+            0.0, 1.0, 0.0, -left_extrinsics_position[1];
+            0.0, 0.0, 1.0, -left_extrinsics_position[2];
             0.0, 0.0, 0.0, 1.0;
         ];
+        let right_extrinsics_position = camera_calib
+            .map(|c| c.right.extrinsics.position)
+            .unwrap_or_default();
         let right_cam: Matrix4<_> = matrix![
-            1.0, 0.0, 0.0, -camera_calib.right.extrinsics.position[0];
-            0.0, 1.0, 0.0, -camera_calib.right.extrinsics.position[1];
-            0.0, 0.0, 1.0, -camera_calib.right.extrinsics.position[2];
+            1.0, 0.0, 0.0, -right_extrinsics_position[0];
+            0.0, 1.0, 0.0, -right_extrinsics_position[1];
+            0.0, 0.0, 1.0, -right_extrinsics_position[2];
             0.0, 0.0, 0.0, 1.0;
         ];
 
         let (left_eye, right_eye) = match mode {
-            ProjectionMode::FromEye => (hmd_transform * left_eye, hmd_transform * right_eye),
+            ProjectionMode::FromEye => (
+                hmd_transform * eye_to_head[0],
+                hmd_transform * eye_to_head[1],
+            ),
             ProjectionMode::FromCamera => (hmd_transform * left_cam, hmd_transform * right_cam),
         };
         let left_view = left_eye
@@ -166,14 +166,14 @@ impl Projection {
         // respectively.
         //
         let camera_projection_left = matrix![
-            fov_left[0] / 2.0, 0.0, 0.0, 0.0;
-            0.0, fov_left[1], 0.0, 0.0;
+            fov[0][0] / 2.0, 0.0, 0.0, 0.0;
+            0.0, fov[0][1], 0.0, 0.0;
             0.0, 0.0, -1.0, 0.0;
             0.0, 0.0, 0.0, 1.0;
         ];
         let camera_projection_right = matrix![
-            fov_right[0] / 2.0, 0.0, 0.0, 0.0;
-            0.0, fov_right[1] , 0.0, 0.0;
+            fov[1][0] / 2.0, 0.0, 0.0, 0.0;
+            0.0, fov[1][1] , 0.0, 0.0;
             0.0, 0.0, -1.0, 0.0;
             0.0, 0.0, 0.0, 1.0;
         ];
@@ -182,7 +182,7 @@ impl Projection {
             (camera_projection_right * right_view * overlay_transform).cast(),
         )
     }
-    fn update_uniforms(&mut self, params: &ProjectionParameters) -> Result<()> {
+    pub fn set_params(&mut self, params: &ProjectionParameters) -> Result<()> {
         if &self.saved_parameters == params {
             return Ok(());
         }
@@ -194,12 +194,15 @@ impl Projection {
             camera_calib,
         } = params;
         assert_eq!(camera_calib, &self.saved_parameters.camera_calib);
+        let left_extrinsics_position = camera_calib
+            .map(|c| c.left.extrinsics.position)
+            .unwrap_or_default();
         let mut transforms_write = self.uniforms.transforms.each_ref().try_map(|u| u.write())?;
         if mode != &self.saved_parameters.mode {
             let eye_offset_left = if *mode == ProjectionMode::FromEye {
                 [
-                    -camera_calib.left.extrinsics.position[0] as f32 - ipd / 2.0,
-                    camera_calib.left.extrinsics.position[1] as f32,
+                    -left_extrinsics_position[0] as f32 - ipd / 2.0,
+                    left_extrinsics_position[1] as f32,
                 ]
             } else {
                 [0.0, 0.0]
@@ -229,7 +232,7 @@ impl Projection {
         Ok(())
     }
     fn make_uniform_buffer<T: BufferContents>(
-        allocator: &StandardMemoryAllocator,
+        allocator: &impl vulkano::memory::allocator::MemoryAllocator,
         uniform: T,
     ) -> Result<Subbuffer<T>, BufferError> {
         log::debug!("uniform buffer size {}", std::mem::size_of::<T>());
@@ -247,12 +250,12 @@ impl Projection {
             uniform,
         )
     }
-    pub fn new(
+    pub fn new<DSA2: DescriptorSetAllocator<Alloc = DSA>>(
         device: Arc<Device>,
-        allocator: &StandardMemoryAllocator,
-        descriptor_set_allocator: &StandardDescriptorSetAllocator,
+        allocator: &impl vulkano::memory::allocator::MemoryAllocator,
+        descriptor_set_allocator: &DSA2,
         source: Arc<AttachmentImage>,
-        camera_calib: &crate::steam::StereoCamera,
+        camera_calib: &Option<crate::vrapi::StereoCamera>,
     ) -> Result<Self> {
         let [w, h] = source.dimensions().width_height();
         if w != h * 2 {
@@ -284,8 +287,8 @@ impl Projection {
             },
         ]
         .try_map(|u| Self::make_uniform_buffer(allocator, u))?;
-        let transforms = [vs::Transform::default(); 2]
-            .try_map(|u| Self::make_uniform_buffer(allocator, u))?;
+        let transforms =
+            [vs::Transform::default(); 2].try_map(|u| Self::make_uniform_buffer(allocator, u))?;
         let pipeline = GraphicsPipeline::start()
             .vertex_input_state(Vertex::per_vertex())
             .vertex_shader(vs.entry_point("main").unwrap(), ())
@@ -344,7 +347,6 @@ impl Projection {
         after: impl GpuFuture,
         queue: Arc<Queue>,
         output: Arc<AttachmentImage>,
-        params: &ProjectionParameters,
     ) -> Result<impl GpuFuture> {
         let framebuffer = Framebuffer::new(
             self.render_pass.clone(),
@@ -356,8 +358,7 @@ impl Projection {
                 ..Default::default()
             },
         )?;
-        self.update_uniforms(params)?;
-        let ProjectionParameters { overlay_width, .. } = params;
+        let ProjectionParameters { overlay_width, .. } = &self.saved_parameters;
         let [w, h] = self.source.dimensions().width_height();
         let mut cmdbuf = AutoCommandBufferBuilder::primary(
             cmdbuf_allocator,
