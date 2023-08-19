@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use std::sync::Arc;
+use std::{ops::Deref, sync::Arc};
 use vulkano::{
     buffer::{Buffer, BufferCreateInfo, BufferUsage},
     command_buffer::SubpassContents,
@@ -14,7 +14,9 @@ use vulkano::{
     device::{Device, DeviceOwned, Queue},
     image::view::{ImageView, ImageViewCreateInfo},
     image::{view::ImageViewCreationError, AttachmentImage},
-    memory::allocator::{MemoryAllocatePreference, MemoryUsage, StandardMemoryAllocator, AllocationCreateInfo},
+    memory::allocator::{
+        AllocationCreateInfo, MemoryAllocatePreference, MemoryUsage, StandardMemoryAllocator,
+    },
     pipeline::{
         graphics::{
             input_assembly::{InputAssemblyState, PrimitiveTopology},
@@ -29,7 +31,7 @@ use vulkano::{
     },
     sampler::{Filter, Sampler, SamplerCreateInfo},
     sync::GpuFuture,
-    OomError,
+    Handle, OomError, VulkanObject,
 };
 
 mod vs {
@@ -85,16 +87,28 @@ pub struct GpuYuyvConverter {
     desc_set: Arc<PersistentDescriptorSet>,
 }
 
+impl std::fmt::Debug for GpuYuyvConverter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GpuYuyvConverter")
+            .field("device", &self.device.handle().as_raw())
+            .field("render_pass", &self.render_pass.handle().as_raw())
+            .field("pipeline", &self.pipeline.handle().as_raw())
+            .finish_non_exhaustive()
+    }
+}
+
 /// XXX: We can use VK_KHR_sampler_ycbcr_conversion for this, but I don't
 /// know if it's widely supported. And the image format we need (G8B8G8R8_422_UNORM)
 /// seems to have even less support than the extension itself.
 impl GpuYuyvConverter {
+    /// Create a new YUYV to RGBA8 converter.
+    /// Note the input image's width has to be `w/2`, and `w` has to be even.
     pub fn new(
         device: Arc<Device>,
         descriptor_set_allocator: &StandardDescriptorSetAllocator,
         w: u32,
         h: u32,
-        input: Arc<AttachmentImage>
+        input: &Arc<AttachmentImage>,
     ) -> Result<Self> {
         if w % 2 != 0 {
             return Err(anyhow!("Width can't be odd"));
@@ -156,19 +170,19 @@ impl GpuYuyvConverter {
             desc_set,
         })
     }
-    /// receives a buffer containing a YUYV image, upload it to GPU,
-    /// and convert it to RGBA8.
+    /// Receives a buffer containing a YUYV image, convert it to RGBA8. Note the
+    /// output image's width would be double that of the input image.
     ///
-    /// Returns a GPU future representing the operation, and an image.
-    /// You must make sure the previous conversion is completed before
-    /// calling this function again.
+    /// Returns a GPU future representing the operation, and an image. You must
+    /// make sure the previous conversion is completed before calling this
+    /// function again.
     pub fn yuyv_buffer_to_vulkan_image(
         &self,
         allocator: &StandardMemoryAllocator,
         cmdbuf_allocator: &StandardCommandBufferAllocator,
         after: impl GpuFuture,
-        queue: Arc<Queue>,
-        output: Arc<AttachmentImage>,
+        queue: &Arc<Queue>,
+        output: &Arc<AttachmentImage>,
     ) -> Result<impl GpuFuture> {
         if queue.device() != &self.device
             || allocator.device() != &self.device
@@ -177,7 +191,7 @@ impl GpuYuyvConverter {
             return Err(anyhow!("Device mismatch"));
         }
         if let Some(after_queue) = after.queue() {
-            if queue != after_queue {
+            if queue != &after_queue {
                 return Err(anyhow!("Queue mismatch"));
             }
         }
@@ -244,7 +258,7 @@ impl GpuYuyvConverter {
             .end_render_pass()
             .map_err(|e| ConverterError::Anyhow(e.into()))?;
         Ok(after.then_execute(
-            queue,
+            queue.clone(),
             cmdbuf
                 .build()
                 .map_err(|e| ConverterError::Anyhow(e.into()))?,

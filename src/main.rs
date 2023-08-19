@@ -94,7 +94,7 @@ fn load_splash(
         vulkano::format::Format::R8G8B8A8_UNORM,
         ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED | ImageUsage::COLOR_ATTACHMENT,
     )?;
-    pipeline::submit_cpu_image(&img, cmdbuf_allocator, allocator, queue, &output)?
+    pipeline::submit_cpu_image(&img, cmdbuf_allocator, allocator, &queue, &output)?
         .then_signal_fence()
         .wait(None)?;
     Ok(output)
@@ -332,9 +332,9 @@ fn main() -> Result<()> {
                     &vrsys.eye_to_head(),
                     &hmd_transform,
                     &overlay_transform,
-                    queue.clone(),
+                    &queue,
                     frame,
-                    output.clone(),
+                    &output,
                 )?
                 .then_signal_fence()
                 .wait(None)?;

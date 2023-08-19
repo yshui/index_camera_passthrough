@@ -10,7 +10,7 @@
 //! HMD View: inverse of HMD pose
 //! Camera Project: estimated from camera calibration.
 use anyhow::{anyhow, Result};
-use std::sync::Arc;
+use std::{ops::Deref, sync::Arc};
 use vulkano::{
     buffer::{Buffer, BufferContents, BufferCreateInfo, BufferError, BufferUsage, Subbuffer},
     command_buffer::{
@@ -40,6 +40,7 @@ use vulkano::{
     render_pass::{Framebuffer, RenderPass, Subpass},
     sampler::{Filter, Sampler, SamplerCreateInfo},
     sync::GpuFuture,
+    Handle, VulkanObject,
 };
 mod vs {
     vulkano_shaders::shader! {
@@ -57,7 +58,7 @@ mod fs {
     }
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Debug)]
 pub struct ProjectionParameters {
     pub ipd: f32,
     pub overlay_width: f32,
@@ -71,6 +72,14 @@ struct Uniforms {
     transforms: [Subbuffer<vs::Transform>; 2],
 }
 
+impl std::fmt::Debug for Uniforms {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Uniforms")
+            .field("transforms", &())
+            .finish_non_exhaustive()
+    }
+}
+
 pub struct Projection<T> {
     source: Arc<AttachmentImage>,
     pipeline: Arc<GraphicsPipeline>,
@@ -79,6 +88,17 @@ pub struct Projection<T> {
     uniforms: Uniforms,
     saved_parameters: ProjectionParameters,
     desc_sets: [Arc<PersistentDescriptorSet<T>>; 2],
+}
+impl<T> std::fmt::Debug for Projection<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Projection")
+            .field("source", &self.source.inner().image.handle().as_raw())
+            .field("pipeline", &self.pipeline.handle().as_raw())
+            .field("render_pass", &self.render_pass.handle().as_raw())
+            .field("uniforms", &self.uniforms)
+            .field("saved_parameters", &self.saved_parameters)
+            .finish_non_exhaustive()
+    }
 }
 use crate::config::ProjectionMode;
 #[derive(VertexTrait, Default, Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -254,7 +274,7 @@ impl<DSA: DescriptorSetAlloc + 'static> Projection<DSA> {
         device: Arc<Device>,
         allocator: &impl vulkano::memory::allocator::MemoryAllocator,
         descriptor_set_allocator: &DSA2,
-        source: Arc<AttachmentImage>,
+        source: &Arc<AttachmentImage>,
         camera_calib: &Option<crate::vrapi::StereoCamera>,
     ) -> Result<Self> {
         let [w, h] = source.dimensions().width_height();
@@ -337,7 +357,7 @@ impl<DSA: DescriptorSetAlloc + 'static> Projection<DSA> {
             desc_sets,
             render_pass,
             pipeline,
-            source,
+            source: source.clone(),
         })
     }
     pub fn project(
@@ -345,8 +365,8 @@ impl<DSA: DescriptorSetAlloc + 'static> Projection<DSA> {
         allocator: &StandardMemoryAllocator,
         cmdbuf_allocator: &StandardCommandBufferAllocator,
         after: impl GpuFuture,
-        queue: Arc<Queue>,
-        output: Arc<AttachmentImage>,
+        queue: &Arc<Queue>,
+        output: &Arc<AttachmentImage>,
     ) -> Result<impl GpuFuture> {
         let framebuffer = Framebuffer::new(
             self.render_pass.clone(),
@@ -365,7 +385,7 @@ impl<DSA: DescriptorSetAlloc + 'static> Projection<DSA> {
             queue.queue_family_index(),
             OneTimeSubmit,
         )?;
-        cmdbuf.copy_image(CopyImageInfo::images(self.source.clone(), output))?;
+        //cmdbuf.copy_image(CopyImageInfo::images(self.source.clone(), output.clone()))?;
 
         // Y is flipped from the vertex Y because texture coordinate is top-down
         let vertex_buffer = Buffer::from_iter::<Vertex, _>(
@@ -449,6 +469,6 @@ impl<DSA: DescriptorSetAlloc + 'static> Projection<DSA> {
             .bind_vertex_buffers(0, vertex_buffer.clone())
             .draw(vertex_buffer.len() as u32, 1, 0, 0)?
             .end_render_pass()?;
-        Ok(after.then_execute(queue, cmdbuf.build()?)?)
+        Ok(after.then_execute(queue.clone(), cmdbuf.build()?)?)
     }
 }

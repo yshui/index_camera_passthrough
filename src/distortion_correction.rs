@@ -30,6 +30,7 @@ use vulkano::{
     render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass},
     sampler::{Filter, Sampler, SamplerCreateInfo},
     sync::GpuFuture,
+    Handle, VulkanObject,
 };
 
 #[derive(VertexTrait, Default, Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -50,6 +51,23 @@ pub struct StereoCorrection {
     desc_sets: [Arc<PersistentDescriptorSet>; 2],
     /// field-of-view parameter, 0 = left eye, 1 = right eye
     fov: [[f64; 2]; 2],
+}
+
+impl std::fmt::Debug for StereoCorrection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StereoCorrection")
+            .field("device", &self.device.handle().as_raw())
+            .field(
+                "render_passes",
+                &self.render_passes.each_ref().map(|x| x.handle().as_raw()),
+            )
+            .field(
+                "pipelines",
+                &self.pipelines.each_ref().map(|x| x.handle().as_raw()),
+            )
+            .field("fov", &self.fov)
+            .finish_non_exhaustive()
+    }
 }
 
 impl StereoCorrection {
@@ -263,15 +281,15 @@ impl StereoCorrection {
         cmdbuf_allocator: &StandardCommandBufferAllocator,
         allocator: &StandardMemoryAllocator,
         after: impl GpuFuture,
-        queue: Arc<Queue>,
-        output: Arc<AttachmentImage>,
+        queue: &Arc<Queue>,
+        output: &Arc<AttachmentImage>,
     ) -> Result<impl GpuFuture> {
         use vulkano::device::DeviceOwned;
         if queue.device() != &self.device {
             return Err(anyhow!("Device mismatch"));
         }
         if let Some(after_queue) = after.queue() {
-            if after_queue != queue {
+            if &after_queue != queue {
                 return Err(anyhow!("Queue mismatch"));
             }
         }
@@ -337,7 +355,7 @@ impl StereoCorrection {
                 .draw(vertex_buffer.len() as u32, 1, 0, 0)?
                 .end_render_pass()?;
         }
-        Ok(after.then_execute(queue, cmdbuf.build()?)?)
+        Ok(after.then_execute(queue.clone(), cmdbuf.build()?)?)
     }
 }
 

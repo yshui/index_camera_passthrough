@@ -12,12 +12,14 @@ use vulkano::{
     descriptor_set::allocator::{StandardDescriptorSetAlloc, StandardDescriptorSetAllocator},
     device::{Device, DeviceOwned},
     format::Format,
-    image::{AttachmentImage, ImageUsage},
+    image::{AttachmentImage, ImageAccess, ImageUsage},
     memory::allocator::{
         AllocationCreateInfo, MemoryAllocator, MemoryUsage, StandardMemoryAllocator,
     },
     sync::GpuFuture,
+    Handle, VulkanObject,
 };
+
 pub(crate) struct Pipeline {
     yuv: Option<crate::yuv::GpuYuyvConverter>,
     correction: Option<crate::distortion_correction::StereoCorrection>,
@@ -27,9 +29,36 @@ pub(crate) struct Pipeline {
     render_doc: Option<renderdoc::RenderDoc<renderdoc::V100>>,
     cmdbuf_allocator: StandardCommandBufferAllocator,
     memory_allocator: StandardMemoryAllocator,
+    yuv_texture: Arc<AttachmentImage>,
     textures: [Arc<AttachmentImage>; 2],
     ipd: f32,
     camera_config: Option<crate::vrapi::StereoCamera>,
+}
+
+impl std::fmt::Debug for Pipeline {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Pipeline")
+            .field("yuv", &self.yuv)
+            .field("correction", &self.correction)
+            .field("projection", &self.projection)
+            .field("projection_params", &self.projection_params)
+            .field("capture", &self.capture)
+            .field("render_doc", &self.render_doc)
+            .field(
+                "yuv_texture",
+                &self.yuv_texture.inner().image.handle().as_raw(),
+            )
+            .field(
+                "textures",
+                &self
+                    .textures
+                    .each_ref()
+                    .map(|t| t.inner().image.handle().as_raw()),
+            )
+            .field("ipd", &self.ipd)
+            .field("camera_config", &self.camera_config)
+            .finish_non_exhaustive()
+    }
 }
 
 use crate::{config::DisplayMode, CAMERA_SIZE};
@@ -38,7 +67,7 @@ pub(crate) fn submit_cpu_image(
     img: &[u8],
     cmdbuf_allocator: &impl CommandBufferAllocator,
     allocator: &impl MemoryAllocator,
-    queue: Arc<vulkano::device::Queue>,
+    queue: &Arc<vulkano::device::Queue>,
     output: &Arc<AttachmentImage>,
 ) -> Result<impl GpuFuture> {
     let buffer = Buffer::new_slice::<u8>(
@@ -61,7 +90,7 @@ pub(crate) fn submit_cpu_image(
         CommandBufferUsage::OneTimeSubmit,
     )?;
     cmdbuf.copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(buffer, output.clone()))?;
-    Ok(cmdbuf.build()?.execute(queue)?)
+    Ok(cmdbuf.build()?.execute(queue.clone())?)
 }
 
 enum EitherGpuFuture<L, R> {
@@ -199,51 +228,62 @@ impl Pipeline {
         let descriptor_set_allocator = StandardDescriptorSetAllocator::new(device.clone());
         let allocator = StandardMemoryAllocator::new_default(device.clone());
         // Allocate intermediate textures
+        let yuv_texture = AttachmentImage::with_usage(
+            &allocator,
+            [CAMERA_SIZE, CAMERA_SIZE],
+            Format::R8G8B8A8_UNORM,
+            ImageUsage::TRANSFER_DST
+                | ImageUsage::TRANSFER_SRC
+                | ImageUsage::SAMPLED
+                | ImageUsage::COLOR_ATTACHMENT,
+        )?;
         let textures = [0, 1].try_map(|_| {
             AttachmentImage::with_usage(
                 &allocator,
                 [CAMERA_SIZE * 2, CAMERA_SIZE],
                 Format::R8G8B8A8_UNORM,
-                ImageUsage::TRANSFER_DST
-                    | ImageUsage::TRANSFER_SRC
-                    | ImageUsage::SAMPLED
-                    | ImageUsage::COLOR_ATTACHMENT,
+                ImageUsage::SAMPLED | ImageUsage::COLOR_ATTACHMENT,
             )
         })?;
-        let mut texture_id = 0;
+        // if source is YUV: upload -> yuv_texture -> converter -> output_a
+        // if source is RGB: upload -> output_a
         let converter = source_is_yuv
             .then(|| {
-                texture_id ^= 1;
                 crate::yuv::GpuYuyvConverter::new(
                     device.clone(),
                     &descriptor_set_allocator,
                     CAMERA_SIZE * 2,
                     CAMERA_SIZE,
-                    textures[texture_id ^ 1].clone(),
+                    &yuv_texture,
                 )
             })
             .transpose()?;
+        // if correction is enabled: output_a -> correction -> textures[1]
+        // otherwise: output_a
         let correction = camera_config
             .map(|cfg| {
-                texture_id ^= 1;
                 crate::distortion_correction::StereoCorrection::new(
                     device.clone(),
                     &allocator,
                     &descriptor_set_allocator,
-                    textures[texture_id ^ 1].clone(),
+                    textures[0].clone(),
                     &cfg,
                 )
             })
             .transpose()?;
         let (projector, projection_mode) =
             if let DisplayMode::Stereo { projection_mode } = display_mode {
-                texture_id ^= 1;
+                let texture = if correction.is_some() {
+                    &textures[1]
+                } else {
+                    &textures[0]
+                };
                 (
                     Some(crate::projection::Projection::new(
                         device.clone(),
                         &allocator,
                         &descriptor_set_allocator,
-                        textures[texture_id ^ 1].clone(),
+                        texture,
                         &camera_config,
                     )?),
                     Some(projection_mode),
@@ -264,19 +304,27 @@ impl Pipeline {
             .map(|c| c.fov())
             .unwrap_or([[1.19; 2]; 2]); // default to roughly 100 degrees fov, hopefully this is sensible
         log::info!("Adjusted FOV: {:?}", fov);
+        let render_doc = renderdoc::RenderDoc::new().ok();
+        if render_doc.is_some() {
+            log::info!("RenderDoc loaded");
+        }
         Ok(Self {
-            projection: projector,
-            projection_params,
-            correction,
+            //projection: projector,
+            //projection_params,
+            //correction,
+            projection: None,
+            projection_params: None,
+            correction: None,
             yuv: converter,
             capture: false,
-            render_doc: renderdoc::RenderDoc::new().ok(),
+            render_doc,
             cmdbuf_allocator: StandardCommandBufferAllocator::new(
                 device.clone(),
                 Default::default(),
             ),
             memory_allocator: allocator,
             textures,
+            yuv_texture,
             ipd,
             camera_config,
         })
@@ -291,9 +339,9 @@ impl Pipeline {
         eye_to_head: &[Matrix4<f64>; 2],
         hmd_transform: &Matrix4<f64>,
         overlay_transform: &Matrix4<f64>,
-        queue: Arc<vulkano::device::Queue>,
+        queue: &Arc<vulkano::device::Queue>,
         input: &[u8],
-        output: Arc<AttachmentImage>,
+        output: &Arc<AttachmentImage>,
     ) -> Result<impl GpuFuture> {
         if self.capture {
             if let Some(rd) = self.render_doc.as_mut() {
@@ -303,27 +351,36 @@ impl Pipeline {
         }
 
         // 1. submit image to GPU
-        let mut next_texture = 0;
-        let future = submit_cpu_image(
-            input,
-            &self.cmdbuf_allocator,
-            &self.memory_allocator,
-            queue.clone(),
-            &self.textures[next_texture],
-        )?;
-        next_texture = next_texture ^ 1;
         // 2. convert YUYV to RGB
+        let texture = if self.projection.is_some() || self.correction.is_some() {
+            &self.textures[0]
+        } else {
+            &output
+        };
         let future = if let Some(converter) = &self.yuv {
+            let future = submit_cpu_image(
+                input,
+                &self.cmdbuf_allocator,
+                &self.memory_allocator,
+                queue,
+                &self.yuv_texture,
+            )?;
             let future = converter.yuyv_buffer_to_vulkan_image(
                 &self.memory_allocator,
                 &self.cmdbuf_allocator,
                 future,
-                queue.clone(),
-                self.textures[next_texture].clone(),
+                queue,
+                texture,
             )?;
-            next_texture = next_texture ^ 1;
             EitherGpuFuture::Left(future)
         } else {
+            let future = submit_cpu_image(
+                input,
+                &self.cmdbuf_allocator,
+                &self.memory_allocator,
+                queue,
+                texture,
+            )?;
             EitherGpuFuture::Right(future)
         };
         // TODO combine correction and projection
@@ -333,11 +390,11 @@ impl Pipeline {
                 &self.cmdbuf_allocator,
                 &self.memory_allocator,
                 future,
-                queue.clone(),
+                queue,
                 if self.projection.is_some() {
-                    self.textures[next_texture].clone()
+                    &self.textures[1]
                 } else {
-                    output.clone()
+                    output
                 },
             )?;
             EitherGpuFuture::Left(future)
@@ -369,8 +426,8 @@ impl Pipeline {
                 &self.memory_allocator,
                 &self.cmdbuf_allocator,
                 future,
-                queue.clone(),
-                output.clone(),
+                queue,
+                output,
             )?)
         } else {
             EitherGpuFuture::Right(future)
