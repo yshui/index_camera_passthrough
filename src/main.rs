@@ -69,11 +69,11 @@ fn first_run(xdg: &BaseDirectories) -> Result<()> {
         env!("CARGO_MANIFEST_DIR"),
         "/index_camera_passthrough.toml"
     ));
-    let config = xdg.create_config_directory("index_camera_passthrough.toml")?;
+    let config = xdg.place_config_file("index_camera_passthrough.toml")?;
     if !config.exists() {
         std::fs::write(&config, DEFAULT_CONFIG)?;
     }
-    let action_manifest = xdg.create_data_directory("actions.json")?;
+    let action_manifest = xdg.place_data_file("actions.json")?;
     if !action_manifest.exists() {
         std::fs::write(&action_manifest, STEAMVR_ACTION_MANIFEST)?;
     }
@@ -104,7 +104,7 @@ fn main() -> Result<()> {
     let xdg = xdg::BaseDirectories::with_prefix("index_camera_passthrough")?;
     first_run(&xdg)?;
 
-    let cfg = config::load_config()?;
+    let cfg = config::load_config(&xdg)?;
     if cfg.debug {
         std::env::set_var("RUST_LOG", "debug");
     }

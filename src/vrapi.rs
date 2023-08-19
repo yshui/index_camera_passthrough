@@ -70,6 +70,7 @@ pub enum Event {
     IpdChanged(f32),
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Action {
     Button1 = 0,
     Button2 = 1,
@@ -123,7 +124,7 @@ impl OpenVr {
         let sys = crate::openvr::VRSystem::init()?;
         let vroverlay = sys.overlay().create_overlay(APP_KEY, APP_NAME)?;
         let mut input = unsafe { Pin::new_unchecked(&mut *openvr_sys2::VRInput()) };
-        let action_manifest = xdg.find_config_file("actions.json").unwrap();
+        let action_manifest = xdg.find_data_file("actions.json").unwrap();
         let action_manifest = std::ffi::CString::new(action_manifest.to_str().unwrap()).unwrap();
         unsafe {
             input

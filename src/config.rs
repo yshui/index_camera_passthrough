@@ -173,9 +173,9 @@ impl Default for Config {
 }
 
 use anyhow::Result;
-pub fn load_config() -> Result<Config> {
-    let xdgdir = xdg::BaseDirectories::new()?;
-    if let Some(f) = xdgdir.find_config_file("index_camera_passthrough.toml") {
+use xdg::BaseDirectories;
+pub fn load_config(xdg: &BaseDirectories) -> Result<Config> {
+    if let Some(f) = xdg.find_config_file("index_camera_passthrough.toml") {
         let cfg = std::fs::read_to_string(f)?;
         Ok(toml::from_str(&cfg)?)
     } else {
