@@ -50,14 +50,17 @@ impl State {
         }
         match (&self.state, button_pressed) {
             (InternalState::Refractory, 0) => {
+                log::debug!("Refractory -> Armed");
                 self.state = InternalState::Armed;
             }
             (InternalState::Refractory, _) => (),
             (InternalState::Activated(_), 0) | (InternalState::Activated(_), 1) => {
+                log::debug!("Activated -> Armed");
                 self.state = InternalState::Armed;
             }
             (InternalState::Activated(_), _) => (),
             (InternalState::Armed, 2) => {
+                log::debug!("Armed -> Activated");
                 self.state = InternalState::Activated(Instant::now());
             }
             (InternalState::Armed, _) => (),
@@ -67,10 +70,12 @@ impl State {
     pub fn turn(&mut self) -> Action {
         if let InternalState::Activated(start) = self.state {
             if !self.visible && std::time::Instant::now() - start > self.delay {
+                log::debug!("Show overlay, Activated -> Refactory");
                 self.state = InternalState::Refractory;
                 self.visible = true;
                 Action::ShowOverlay
             } else if self.visible {
+                log::debug!("Hide overlay, Activated -> Refactory");
                 self.state = InternalState::Refractory;
                 self.visible = false;
                 Action::HideOverlay

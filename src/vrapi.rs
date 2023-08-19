@@ -134,7 +134,7 @@ impl OpenVr {
         .into_result()?;
         let mut button = [const { MaybeUninit::uninit() }; 3];
         for i in 0..2 {
-            let name = CString::new(format!("actions/main/in/button{}", i + 1)).unwrap();
+            let name = CString::new(format!("/actions/main/in/button{}", i + 1)).unwrap();
             unsafe {
                 input
                     .as_mut()
@@ -146,7 +146,7 @@ impl OpenVr {
             };
         }
         unsafe {
-            let name = CString::new("actions/main/in/debug").unwrap();
+            let name = CString::new("/actions/main/in/debug").unwrap();
             input
                 .as_mut()
                 .GetActionHandle(
@@ -157,14 +157,16 @@ impl OpenVr {
         }
         let button = unsafe { MaybeUninit::array_assume_init(button) };
 
+        log::debug!("buttons: {:?}", button);
         let action_set = unsafe {
             let mut action_set = MaybeUninit::uninit();
-            let action_set_name = CString::new("actions/main").unwrap();
+            let action_set_name = CString::new("/actions/main").unwrap();
             input
                 .GetActionSetHandle(action_set_name.as_ptr(), action_set.as_mut_ptr())
                 .into_result()?;
             action_set.assume_init()
         };
+        log::debug!("action_set: {:?}", action_set);
         Ok(Self {
             sys,
             handle: vroverlay,
@@ -435,17 +437,22 @@ impl Vr for OpenVr {
     }
     fn get_action_state(&self, action: Action) -> Result<bool, Self::Error> {
         let action_handle = self.buttons[action as usize];
+        //log::debug!("action_handle: {action_handle:x}");
         let vrinput = unsafe { Pin::new_unchecked(&mut *openvr_sys2::VRInput()) };
         let action_data = unsafe {
             let mut action_data = MaybeUninit::uninit();
-            vrinput
+            let result = vrinput
                 .GetDigitalActionData(
                     action_handle,
                     action_data.as_mut_ptr(),
                     std::mem::size_of::<openvr_sys2::VRInputValueHandle_t>() as u32,
                     openvr_sys2::vr::k_ulInvalidInputValueHandle,
                 )
-                .into_result()?;
+                .into_result();
+            if result.is_err() {
+                log::error!("GetDigitalActionData failed: {:?}", result);
+                return Ok(false);
+            }
             action_data.assume_init()
         };
         Ok(action_data.bState)

@@ -272,12 +272,15 @@ fn main() -> Result<()> {
         camera_config,
     )?;
 
+    log::debug!("pipeline: {pipeline:?}");
+
     // Fetch the first camera frame
     let (mut frame, mut metadata) = v4l::io::traits::CaptureStream::next(&mut video_stream)?;
     let first_camera_frame_timestamp: std::time::Duration = metadata.timestamp.into();
     let render_start_instant = std::time::Instant::now();
 
     let mut state = events::State::new(cfg.open_delay);
+    let mut debug_pressed = false;
     'main_loop: loop {
         if state.visible() {
             // We try to get the pose at the time when the camera frame is captured. GetDeviceToAbsoluteTrackingPose
@@ -371,7 +374,13 @@ fn main() -> Result<()> {
         // Handle user inputs
         vrsys.update_action_state()?;
         if vrsys.get_action_state(vrapi::Action::Debug)? {
-            pipeline.capture_next_frame()
+            if !debug_pressed {
+                log::debug!("Capture next frame");
+                pipeline.capture_next_frame();
+                debug_pressed = true;
+            }
+        } else {
+            debug_pressed = false;
         }
         state.handle(&vrsys)?;
         match state.turn() {
