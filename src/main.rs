@@ -27,7 +27,10 @@ use v4l::video::Capture;
 use vulkano::{
     command_buffer::allocator::{CommandBufferAllocator, StandardCommandBufferAllocator},
     device::{self, DeviceCreateInfo, QueueCreateInfo, QueueFlags},
-    image::{AttachmentImage, ImageUsage},
+    image::{
+        immutable::ImmutableImageInitialization, ImageAccess, ImageCreateFlags, ImageDimensions,
+        ImageLayout, ImageUsage, ImmutableImage, MipmapsCount,
+    },
     instance::{Instance, InstanceCreateInfo, Version},
     memory::allocator::{MemoryAllocator, StandardMemoryAllocator},
     sync::GpuFuture,
@@ -80,23 +83,46 @@ fn first_run(xdg: &BaseDirectories) -> Result<()> {
     Ok(())
 }
 
+fn create_submittable_image(
+    allocator: &impl MemoryAllocator,
+    queue: &vulkano::device::Queue,
+) -> Result<(Arc<ImmutableImage>, Arc<ImmutableImageInitialization>)> {
+    Ok(ImmutableImage::uninitialized(
+        allocator,
+        ImageDimensions::Dim2d {
+            width: CAMERA_SIZE * 2,
+            height: CAMERA_SIZE,
+            array_layers: 1,
+        },
+        vulkano::format::Format::R8G8B8A8_UNORM,
+        MipmapsCount::One,
+        ImageUsage::TRANSFER_DST
+            | ImageUsage::SAMPLED
+            | ImageUsage::COLOR_ATTACHMENT
+            | ImageUsage::TRANSFER_SRC,
+        ImageCreateFlags::empty(),
+        ImageLayout::TransferSrcOptimal,
+        [queue.queue_family_index()],
+    )?)
+}
+
 fn load_splash(
     cmdbuf_allocator: &impl CommandBufferAllocator,
     allocator: &impl MemoryAllocator,
     queue: Arc<vulkano::device::Queue>,
-) -> Result<Arc<vulkano::image::AttachmentImage>> {
+) -> Result<Arc<ImmutableImage>> {
+    log::debug!("loading splash");
     let img = image::load_from_memory_with_format(SPLASH_IMAGE, image::ImageFormat::Png)?
         .into_rgba8()
         .into_raw();
-    let output = AttachmentImage::with_usage(
-        allocator,
-        [CAMERA_SIZE * 2, CAMERA_SIZE],
-        vulkano::format::Format::R8G8B8A8_UNORM,
-        ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED | ImageUsage::COLOR_ATTACHMENT,
-    )?;
-    pipeline::submit_cpu_image(&img, cmdbuf_allocator, allocator, &queue, &output)?
+    let (output, output_init) = create_submittable_image(allocator, &queue)?;
+    queue
+        .device()
+        .set_debug_utils_object_name(&output.inner().image, Some("splash"))?;
+    pipeline::submit_cpu_image(&img, cmdbuf_allocator, allocator, &queue, output_init)?
         .then_signal_fence()
         .wait(None)?;
+    log::debug!("splash loaded");
     Ok(output)
 }
 
@@ -149,6 +175,7 @@ fn main() -> Result<()> {
         InstanceCreateInfo {
             max_api_version: Some(Version::V1_6),
             enabled_extensions: extensions,
+            // enabled_layers: vec!["VK_LAYER_KHRONOS_validation".to_owned()],
             ..Default::default()
         },
     )?;
@@ -181,13 +208,9 @@ fn main() -> Result<()> {
         device.clone(),
         vulkano::command_buffer::allocator::StandardCommandBufferAllocatorCreateInfo::default(),
     );
-    let fast_allocator = StandardMemoryAllocator::new_default(device.clone());
+    let allocator = StandardMemoryAllocator::new_default(device.clone());
 
-    let splash = load_splash(
-        &cmdbuf_allocator,
-        &StandardMemoryAllocator::new_default(device.clone()),
-        queue.clone(),
-    )?;
+    let splash = load_splash(&cmdbuf_allocator, &allocator, queue.clone())?;
 
     // Create a VROverlay
     match &cfg.display_mode {
@@ -244,6 +267,7 @@ fn main() -> Result<()> {
     vrsys.set_overlay_transformation(overlay_transform)?;
 
     // Show splash screen
+    log::debug!("showing splash");
     vrsys.set_overlay_texture(
         CAMERA_SIZE * 2,
         CAMERA_SIZE,
@@ -254,6 +278,7 @@ fn main() -> Result<()> {
     )?;
 
     // Show overlay
+    log::debug!("showing overlay");
     vrsys.show_overlay()?;
 
     // TODO: don't hardcode this
@@ -300,15 +325,7 @@ fn main() -> Result<()> {
                 elapsed = std::time::Duration::ZERO;
             }
             // Allocate final image
-            let output = vulkano::image::AttachmentImage::with_usage(
-                &fast_allocator,
-                [CAMERA_SIZE * 2, CAMERA_SIZE],
-                vulkano::format::Format::R8G8B8A8_UNORM,
-                ImageUsage::TRANSFER_SRC
-                    | ImageUsage::TRANSFER_DST
-                    | ImageUsage::SAMPLED
-                    | ImageUsage::COLOR_ATTACHMENT,
-            )?;
+            let (output, output_init) = create_submittable_image(&allocator, &queue)?;
 
             let hmd_transform = vrsys.hmd_transform(-elapsed.as_secs_f32());
             match cfg.overlay.position {
@@ -327,17 +344,17 @@ fn main() -> Result<()> {
                 }
             };
 
-            pipeline
-                .run(
-                    &vrsys.eye_to_head(),
-                    &hmd_transform,
-                    &overlay_transform,
-                    &queue,
-                    frame,
-                    &output,
-                )?
-                .then_signal_fence()
-                .wait(None)?;
+            let future = pipeline.run(
+                &vrsys.eye_to_head(),
+                &hmd_transform,
+                &overlay_transform,
+                &queue,
+                frame,
+                output_init,
+            )?;
+            //println!("submission: {:?}", submission);
+            future.flush()?; // can't use then_signal_fence_and_flush() because of a vulkano bug
+            future.then_signal_fence().wait(None)?;
 
             // Submit the texture
             vrsys.set_overlay_texture(

@@ -12,7 +12,7 @@ use vulkano::{
     descriptor_set::allocator::{StandardDescriptorSetAlloc, StandardDescriptorSetAllocator},
     device::{Device, DeviceOwned},
     format::Format,
-    image::{AttachmentImage, ImageAccess, ImageUsage},
+    image::{immutable::ImmutableImageInitialization, AttachmentImage, ImageAccess, ImageUsage},
     memory::allocator::{
         AllocationCreateInfo, MemoryAllocator, MemoryUsage, StandardMemoryAllocator,
     },
@@ -68,7 +68,7 @@ pub(crate) fn submit_cpu_image(
     cmdbuf_allocator: &impl CommandBufferAllocator,
     allocator: &impl MemoryAllocator,
     queue: &Arc<vulkano::device::Queue>,
-    output: &Arc<AttachmentImage>,
+    output: Arc<dyn ImageAccess>,
 ) -> Result<impl GpuFuture> {
     let buffer = Buffer::new_slice::<u8>(
         allocator,
@@ -89,7 +89,7 @@ pub(crate) fn submit_cpu_image(
         queue.queue_family_index(),
         CommandBufferUsage::OneTimeSubmit,
     )?;
-    cmdbuf.copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(buffer, output.clone()))?;
+    cmdbuf.copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(buffer, output))?;
     Ok(cmdbuf.build()?.execute(queue.clone())?)
 }
 
@@ -237,13 +237,17 @@ impl Pipeline {
                 | ImageUsage::SAMPLED
                 | ImageUsage::COLOR_ATTACHMENT,
         )?;
-        let textures = [0, 1].try_map(|_| {
-            AttachmentImage::with_usage(
+        device.set_debug_utils_object_name(&yuv_texture.inner().image, Some("yuv_texture"))?;
+        let textures = [0, 1].try_map(|id| {
+            let tex = AttachmentImage::with_usage(
                 &allocator,
                 [CAMERA_SIZE * 2, CAMERA_SIZE],
                 Format::R8G8B8A8_UNORM,
                 ImageUsage::SAMPLED | ImageUsage::COLOR_ATTACHMENT,
-            )
+            )?;
+            device
+                .set_debug_utils_object_name(&tex.inner().image, Some(&format!("texture{id}")))?;
+            anyhow::Ok(tex)
         })?;
         // if source is YUV: upload -> yuv_texture -> converter -> output_a
         // if source is RGB: upload -> output_a
@@ -309,12 +313,9 @@ impl Pipeline {
             log::info!("RenderDoc loaded");
         }
         Ok(Self {
-            //projection: projector,
-            //projection_params,
-            //correction,
-            projection: None,
-            projection_params: None,
-            correction: None,
+            projection: projector,
+            projection_params,
+            correction,
             yuv: converter,
             capture: false,
             render_doc,
@@ -341,8 +342,9 @@ impl Pipeline {
         overlay_transform: &Matrix4<f64>,
         queue: &Arc<vulkano::device::Queue>,
         input: &[u8],
-        output: &Arc<AttachmentImage>,
+        output: Arc<ImmutableImageInitialization>,
     ) -> Result<impl GpuFuture> {
+        let output = output as Arc<dyn ImageAccess>;
         if self.capture {
             if let Some(rd) = self.render_doc.as_mut() {
                 log::info!("Start Capture");
@@ -353,9 +355,9 @@ impl Pipeline {
         // 1. submit image to GPU
         // 2. convert YUYV to RGB
         let texture = if self.projection.is_some() || self.correction.is_some() {
-            &self.textures[0]
+            self.textures[0].clone() as Arc<dyn ImageAccess>
         } else {
-            &output
+            output.clone()
         };
         let future = if let Some(converter) = &self.yuv {
             let future = submit_cpu_image(
@@ -363,14 +365,14 @@ impl Pipeline {
                 &self.cmdbuf_allocator,
                 &self.memory_allocator,
                 queue,
-                &self.yuv_texture,
+                self.yuv_texture.clone(),
             )?;
             let future = converter.yuyv_buffer_to_vulkan_image(
                 &self.memory_allocator,
                 &self.cmdbuf_allocator,
                 future,
                 queue,
-                texture,
+                texture.clone(),
             )?;
             EitherGpuFuture::Left(future)
         } else {
@@ -379,28 +381,31 @@ impl Pipeline {
                 &self.cmdbuf_allocator,
                 &self.memory_allocator,
                 queue,
-                texture,
+                texture.clone(),
             )?;
             EitherGpuFuture::Right(future)
         };
-        // TODO combine correction and projection
+        future.flush()?;
         // 3. lens correction
         let future = if let Some(correction) = &self.correction {
-            let future = correction.correct(
+            let mut future = correction.correct(
                 &self.cmdbuf_allocator,
                 &self.memory_allocator,
                 future,
                 queue,
                 if self.projection.is_some() {
-                    &self.textures[1]
+                    self.textures[1].clone() as Arc<dyn ImageAccess>
                 } else {
-                    output
+                    output.clone()
                 },
             )?;
+            future.flush()?;
+            future.cleanup_finished();
             EitherGpuFuture::Left(future)
         } else {
             EitherGpuFuture::Right(future)
         };
+        // TODO combine correction and projection
         // 4. projection
         let future = if let Some(projector) = self.projection.as_mut() {
             let projection_params = self.projection_params.as_mut().unwrap();
@@ -422,13 +427,16 @@ impl Pipeline {
             projection_params.mvps = [l, r];
             projection_params.ipd = self.ipd;
             projector.set_params(projection_params)?;
-            EitherGpuFuture::Left(projector.project(
+            let mut future = projector.project(
                 &self.memory_allocator,
                 &self.cmdbuf_allocator,
                 future,
                 queue,
                 output,
-            )?)
+            )?;
+            future.flush()?;
+            future.cleanup_finished();
+            EitherGpuFuture::Left(future)
         } else {
             EitherGpuFuture::Right(future)
         };

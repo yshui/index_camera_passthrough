@@ -524,6 +524,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cstr"
+version = "0.2.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8aa998c33a6d3271e3678950a22134cd7dd27cef86dee1b611b5b14207d1d90b"
+dependencies = [
+ "proc-macro2",
+ "quote",
+]
+
+[[package]]
 name = "ctrlc"
 version = "3.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -854,6 +864,7 @@ dependencies = [
  "ash",
  "bytemuck",
  "config",
+ "cstr",
  "ctrlc",
  "env_logger 0.10.0",
  "humantime-serde",

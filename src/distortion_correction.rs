@@ -204,7 +204,7 @@ impl StereoCorrection {
                     Viewport {
                         origin: [size as f32 * id as f32, 0.0],
                         dimensions: [size as f32, size as f32],
-                        depth_range: -1.0..1.0,
+                        depth_range: 0.0..1.0,
                     },
                 ]))
                 .fragment_shader(fs.entry_point("main").unwrap(), ())
@@ -282,7 +282,7 @@ impl StereoCorrection {
         allocator: &StandardMemoryAllocator,
         after: impl GpuFuture,
         queue: &Arc<Queue>,
-        output: &Arc<AttachmentImage>,
+        output: Arc<dyn ImageAccess>,
     ) -> Result<impl GpuFuture> {
         use vulkano::device::DeviceOwned;
         if queue.device() != &self.device {

@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use std::{ops::Deref, sync::Arc};
+use std::sync::Arc;
 use vulkano::{
     buffer::{Buffer, BufferCreateInfo, BufferUsage},
     command_buffer::SubpassContents,
@@ -13,7 +13,7 @@ use vulkano::{
     },
     device::{Device, DeviceOwned, Queue},
     image::view::{ImageView, ImageViewCreateInfo},
-    image::{view::ImageViewCreationError, AttachmentImage},
+    image::{view::ImageViewCreationError, AttachmentImage, ImageAccess},
     memory::allocator::{
         AllocationCreateInfo, MemoryAllocatePreference, MemoryUsage, StandardMemoryAllocator,
     },
@@ -139,7 +139,7 @@ impl GpuYuyvConverter {
                 Viewport {
                     origin: [0.0, 0.0],
                     dimensions: [w as f32, h as f32],
-                    depth_range: -1.0..1.0,
+                    depth_range: 0.0..1.0,
                 },
             ]))
             .fragment_shader(fs.entry_point("main").unwrap(), ())
@@ -182,7 +182,7 @@ impl GpuYuyvConverter {
         cmdbuf_allocator: &StandardCommandBufferAllocator,
         after: impl GpuFuture,
         queue: &Arc<Queue>,
-        output: &Arc<AttachmentImage>,
+        output: Arc<dyn ImageAccess>,
     ) -> Result<impl GpuFuture> {
         if queue.device() != &self.device
             || allocator.device() != &self.device

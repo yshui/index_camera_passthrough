@@ -10,12 +10,12 @@
 //! HMD View: inverse of HMD pose
 //! Camera Project: estimated from camera calibration.
 use anyhow::{anyhow, Result};
-use std::{ops::Deref, sync::Arc};
+use std::sync::Arc;
 use vulkano::{
     buffer::{Buffer, BufferContents, BufferCreateInfo, BufferError, BufferUsage, Subbuffer},
     command_buffer::{
         allocator::StandardCommandBufferAllocator, AutoCommandBufferBuilder,
-        CommandBufferUsage::OneTimeSubmit, CopyImageInfo, RenderPassBeginInfo, SubpassContents,
+        CommandBufferUsage::OneTimeSubmit, RenderPassBeginInfo, SubpassContents,
     },
     descriptor_set::{
         allocator::{DescriptorSetAlloc, DescriptorSetAllocator},
@@ -366,7 +366,7 @@ impl<DSA: DescriptorSetAlloc + 'static> Projection<DSA> {
         cmdbuf_allocator: &StandardCommandBufferAllocator,
         after: impl GpuFuture,
         queue: &Arc<Queue>,
-        output: &Arc<AttachmentImage>,
+        output: Arc<dyn ImageAccess>,
     ) -> Result<impl GpuFuture> {
         let framebuffer = Framebuffer::new(
             self.render_pass.clone(),
@@ -432,7 +432,7 @@ impl<DSA: DescriptorSetAlloc + 'static> Projection<DSA> {
                 [Viewport {
                     origin: [0.0, 0.0],
                     dimensions: [(w / 2) as f32, h as f32],
-                    depth_range: -1.0..1.0,
+                    depth_range: 0.0..1.0,
                 }],
             )
             .bind_pipeline_graphics(self.pipeline.clone())
@@ -456,7 +456,7 @@ impl<DSA: DescriptorSetAlloc + 'static> Projection<DSA> {
                 [Viewport {
                     origin: [(w / 2) as f32, 0.0],
                     dimensions: [(w / 2) as f32, h as f32],
-                    depth_range: -1.0..1.0,
+                    depth_range: 0.0..1.0,
                 }],
             )
             .bind_pipeline_graphics(self.pipeline.clone())

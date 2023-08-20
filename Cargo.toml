@@ -32,6 +32,7 @@ toml = "0.7.3"
 humantime-serde = "1.0.1"
 bytemuck = { version = "^1.7", features = ["derive"] }
 libloading = "0.8.0"
+cstr = "0.2.11"
 
 [build-dependencies]
 anyhow = "1.0.45"
