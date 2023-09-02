@@ -25,16 +25,19 @@ use nalgebra::{matrix, Matrix4};
 
 use v4l::video::Capture;
 use vulkano::{
-    command_buffer::allocator::{CommandBufferAllocator, StandardCommandBufferAllocator},
-    device::{self, DeviceCreateInfo, QueueCreateInfo, QueueFlags},
-    image::{
-        immutable::ImmutableImageInitialization, ImageAccess, ImageCreateFlags, ImageDimensions,
-        ImageLayout, ImageUsage, ImmutableImage, MipmapsCount,
+    command_buffer::{
+        allocator::{CommandBufferAllocator, StandardCommandBufferAllocator},
+        sys::{CommandBufferBeginInfo, UnsafeCommandBufferBuilder},
+        CommandBufferLevel, CommandBufferUsage,
     },
+    device::{self, DeviceCreateInfo, QueueCreateInfo, QueueFlags},
+    image::{Image, ImageCreateInfo, ImageLayout, ImageUsage},
     instance::{Instance, InstanceCreateInfo, Version},
-    memory::allocator::{MemoryAllocator, StandardMemoryAllocator},
-    sync::GpuFuture,
-    VulkanLibrary,
+    memory::allocator::{
+        AllocationCreateInfo, MemoryAllocator, MemoryTypeFilter, StandardMemoryAllocator,
+    },
+    sync::{AccessFlags, DependencyInfo, GpuFuture, ImageMemoryBarrier, PipelineStages},
+    VulkanLibrary, VulkanObject,
 };
 use xdg::BaseDirectories;
 /// Camera image will be (size * 2, size)
@@ -46,6 +49,7 @@ use crate::vrapi::Vr;
 
 static APP_KEY: &str = "index_camera_passthrough_rs\0";
 static APP_NAME: &str = "Camera\0";
+static APP_VERSION: u32 = 0;
 
 fn find_index_camera() -> Result<std::path::PathBuf> {
     let mut it = udev::Enumerator::new()?;
@@ -83,45 +87,44 @@ fn first_run(xdg: &BaseDirectories) -> Result<()> {
     Ok(())
 }
 
-fn create_submittable_image(
-    allocator: &impl MemoryAllocator,
-    queue: &vulkano::device::Queue,
-) -> Result<(Arc<ImmutableImage>, Arc<ImmutableImageInitialization>)> {
-    Ok(ImmutableImage::uninitialized(
+fn create_submittable_image(allocator: &impl MemoryAllocator) -> Result<Arc<Image>> {
+    Ok(Image::new(
         allocator,
-        ImageDimensions::Dim2d {
-            width: CAMERA_SIZE * 2,
-            height: CAMERA_SIZE,
-            array_layers: 1,
+        ImageCreateInfo {
+            extent: [CAMERA_SIZE * 2, CAMERA_SIZE, 1],
+            format: vulkano::format::Format::R8G8B8A8_UNORM,
+            usage: ImageUsage::TRANSFER_DST
+                | ImageUsage::SAMPLED
+                | ImageUsage::COLOR_ATTACHMENT
+                | ImageUsage::TRANSFER_SRC,
+            mip_levels: 1,
+            ..Default::default()
         },
-        vulkano::format::Format::R8G8B8A8_UNORM,
-        MipmapsCount::One,
-        ImageUsage::TRANSFER_DST
-            | ImageUsage::SAMPLED
-            | ImageUsage::COLOR_ATTACHMENT
-            | ImageUsage::TRANSFER_SRC,
-        ImageCreateFlags::empty(),
-        ImageLayout::TransferSrcOptimal,
-        [queue.queue_family_index()],
+        AllocationCreateInfo {
+            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
+            ..Default::default()
+        },
     )?)
 }
 
 fn load_splash(
-    cmdbuf_allocator: &impl CommandBufferAllocator,
+    cmdbuf_allocator: &(impl CommandBufferAllocator + 'static),
     allocator: &impl MemoryAllocator,
     queue: Arc<vulkano::device::Queue>,
-) -> Result<Arc<ImmutableImage>> {
+) -> Result<Arc<Image>> {
     log::debug!("loading splash");
     let img = image::load_from_memory_with_format(SPLASH_IMAGE, image::ImageFormat::Png)?
         .into_rgba8()
         .into_raw();
-    let (output, output_init) = create_submittable_image(allocator, &queue)?;
+    let output = create_submittable_image(allocator)?;
     queue
         .device()
-        .set_debug_utils_object_name(&output.inner().image, Some("splash"))?;
-    pipeline::submit_cpu_image(&img, cmdbuf_allocator, allocator, &queue, output_init)?
-        .then_signal_fence()
-        .wait(None)?;
+        .set_debug_utils_object_name(&output, Some("splash"))?;
+    let future =
+        pipeline::submit_cpu_image(&img, cmdbuf_allocator, allocator, &queue, output.clone())?;
+    future.flush()?;
+    future.then_signal_fence().wait(None)?;
+
     log::debug!("splash loaded");
     Ok(output)
 }
@@ -180,7 +183,7 @@ fn main() -> Result<()> {
         },
     )?;
     let mut vrsys = crate::vrapi::OpenVr::new(&xdg)?;
-    let device = vrsys.target_device(&instance)?;
+    let device = vrsys.create_device(&instance)?;
     let queue_family = device
         .queue_family_properties()
         .iter()
@@ -272,6 +275,7 @@ fn main() -> Result<()> {
         CAMERA_SIZE * 2,
         CAMERA_SIZE,
         splash,
+        vulkano::image::ImageLayout::ColorAttachmentOptimal,
         device.clone(),
         queue.clone(),
         instance.clone(),
@@ -325,7 +329,7 @@ fn main() -> Result<()> {
                 elapsed = std::time::Duration::ZERO;
             }
             // Allocate final image
-            let (output, output_init) = create_submittable_image(&allocator, &queue)?;
+            let output = create_submittable_image(&allocator)?;
 
             let hmd_transform = vrsys.hmd_transform(-elapsed.as_secs_f32());
             match cfg.overlay.position {
@@ -350,7 +354,7 @@ fn main() -> Result<()> {
                 &overlay_transform,
                 &queue,
                 frame,
-                output_init,
+                output.clone(),
             )?;
             //println!("submission: {:?}", submission);
             future.flush()?; // can't use then_signal_fence_and_flush() because of a vulkano bug
@@ -361,6 +365,7 @@ fn main() -> Result<()> {
                 CAMERA_SIZE * 2,
                 CAMERA_SIZE,
                 output,
+                ImageLayout::ColorAttachmentOptimal,
                 device.clone(),
                 queue.clone(),
                 instance.clone(),
@@ -379,6 +384,7 @@ fn main() -> Result<()> {
             //});
             match event {
                 vrapi::Event::RequestExit => {
+                    log::info!("RequestExit");
                     vrsys.acknowledge_quit();
                     break 'main_loop;
                 }

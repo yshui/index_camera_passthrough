@@ -12,35 +12,41 @@
 use anyhow::{anyhow, Result};
 use std::sync::Arc;
 use vulkano::{
-    buffer::{Buffer, BufferContents, BufferCreateInfo, BufferError, BufferUsage, Subbuffer},
+    buffer::{
+        Buffer, BufferAllocateError, BufferContents, BufferCreateInfo, BufferUsage, Subbuffer,
+    },
     command_buffer::{
         allocator::StandardCommandBufferAllocator, AutoCommandBufferBuilder,
-        CommandBufferUsage::OneTimeSubmit, RenderPassBeginInfo, SubpassContents,
+        CommandBufferUsage::OneTimeSubmit, RenderPassBeginInfo, SubpassBeginInfo, SubpassContents,
+        SubpassEndInfo,
     },
     descriptor_set::{
         allocator::{DescriptorSetAlloc, DescriptorSetAllocator},
         PersistentDescriptorSet, WriteDescriptorSet,
     },
     device::{Device, Queue},
+    image::view::{ImageView, ImageViewCreateInfo},
     image::{
-        view::{ImageView, ImageViewCreateInfo},
-        AttachmentImage, ImageAccess,
+        sampler::{Filter, Sampler, SamplerCreateInfo},
+        Image, ImageLayout,
     },
     memory::allocator::{
-        AllocationCreateInfo, MemoryAllocatePreference, MemoryUsage, StandardMemoryAllocator,
+        AllocationCreateInfo, MemoryAllocatePreference, MemoryTypeFilter, StandardMemoryAllocator,
     },
     pipeline::{
         graphics::{
             input_assembly::{InputAssemblyState, PrimitiveTopology},
-            vertex_input::Vertex as VertexTrait,
+            vertex_input::{Vertex as VertexTrait, VertexDefinition},
             viewport::{Viewport, ViewportState},
+            GraphicsPipelineCreateInfo, rasterization::RasterizationState, multisample::MultisampleState, color_blend::ColorBlendState,
         },
-        GraphicsPipeline, Pipeline, PipelineBindPoint,
+        layout::PipelineDescriptorSetLayoutCreateInfo,
+        GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineLayout,
+        PipelineShaderStageCreateInfo,
     },
     render_pass::{Framebuffer, RenderPass, Subpass},
-    sampler::{Filter, Sampler, SamplerCreateInfo},
     sync::GpuFuture,
-    Handle, VulkanObject,
+    Handle, Validated, VulkanObject,
 };
 mod vs {
     vulkano_shaders::shader! {
@@ -81,7 +87,7 @@ impl std::fmt::Debug for Uniforms {
 }
 
 pub struct Projection<T> {
-    source: Arc<AttachmentImage>,
+    source: Arc<Image>,
     pipeline: Arc<GraphicsPipeline>,
     render_pass: Arc<RenderPass>,
     // [0: left, 1: right]
@@ -92,7 +98,7 @@ pub struct Projection<T> {
 impl<T> std::fmt::Debug for Projection<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Projection")
-            .field("source", &self.source.inner().image.handle().as_raw())
+            .field("source", &self.source.handle().as_raw())
             .field("pipeline", &self.pipeline.handle().as_raw())
             .field("render_pass", &self.render_pass.handle().as_raw())
             .field("uniforms", &self.uniforms)
@@ -254,7 +260,7 @@ impl<DSA: DescriptorSetAlloc + 'static> Projection<DSA> {
     fn make_uniform_buffer<T: BufferContents>(
         allocator: &impl vulkano::memory::allocator::MemoryAllocator,
         uniform: T,
-    ) -> Result<Subbuffer<T>, BufferError> {
+    ) -> Result<Subbuffer<T>, Validated<BufferAllocateError>> {
         log::debug!("uniform buffer size {}", std::mem::size_of::<T>());
         Buffer::from_data(
             allocator,
@@ -263,7 +269,8 @@ impl<DSA: DescriptorSetAlloc + 'static> Projection<DSA> {
                 ..Default::default()
             },
             AllocationCreateInfo {
-                usage: MemoryUsage::Upload,
+                memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE
+                    | MemoryTypeFilter::PREFER_DEVICE,
                 allocate_preference: MemoryAllocatePreference::Unknown,
                 ..Default::default()
             },
@@ -274,10 +281,10 @@ impl<DSA: DescriptorSetAlloc + 'static> Projection<DSA> {
         device: Arc<Device>,
         allocator: &impl vulkano::memory::allocator::MemoryAllocator,
         descriptor_set_allocator: &DSA2,
-        source: &Arc<AttachmentImage>,
+        source: &Arc<Image>,
         camera_calib: &Option<crate::vrapi::StereoCamera>,
     ) -> Result<Self> {
-        let [w, h] = source.dimensions().width_height();
+        let [w, h, _] = source.extent();
         if w != h * 2 {
             return Err(anyhow!("Input not square"));
         }
@@ -286,10 +293,11 @@ impl<DSA: DescriptorSetAlloc + 'static> Projection<DSA> {
         let render_pass = vulkano::single_pass_renderpass!(device.clone(),
             attachments: {
                 color: {
-                    load: Load,
-                    store: Store,
                     format: vulkano::format::Format::R8G8B8A8_UNORM,
                     samples: 1,
+                    load_op: Load,
+                    store_op: Store,
+                    final_layout: ImageLayout::TransferSrcOptimal,
                 }
             },
             pass: {
@@ -307,18 +315,40 @@ impl<DSA: DescriptorSetAlloc + 'static> Projection<DSA> {
             },
         ]
         .try_map(|u| Self::make_uniform_buffer(allocator, u))?;
+        let vs = vs.entry_point("main").unwrap();
+        let fs = fs.entry_point("main").unwrap();
+        let stages = [
+            PipelineShaderStageCreateInfo::new(vs.clone()),
+            PipelineShaderStageCreateInfo::new(fs),
+        ];
+        let layout = PipelineLayout::new(
+            device.clone(),
+            PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages)
+                .into_pipeline_layout_create_info(device.clone())?,
+        )?;
         let transforms =
             [vs::Transform::default(); 2].try_map(|u| Self::make_uniform_buffer(allocator, u))?;
-        let pipeline = GraphicsPipeline::start()
-            .vertex_input_state(Vertex::per_vertex())
-            .vertex_shader(vs.entry_point("main").unwrap(), ())
-            .input_assembly_state(
-                InputAssemblyState::new().topology(PrimitiveTopology::TriangleStrip),
-            )
-            .viewport_state(ViewportState::viewport_dynamic_scissor_irrelevant())
-            .fragment_shader(fs.entry_point("main").unwrap(), ())
-            .render_pass(Subpass::from(render_pass.clone(), 0).unwrap())
-            .build(device.clone())?;
+        log::info!("before");
+        let pipeline = GraphicsPipeline::new(
+            device.clone(),
+            None,
+            GraphicsPipelineCreateInfo {
+                vertex_input_state: Some(
+                    Vertex::per_vertex().definition(&vs.info().input_interface)?,
+                ),
+                stages: stages.into_iter().collect(),
+                input_assembly_state: Some(
+                    InputAssemblyState::new().topology(PrimitiveTopology::TriangleStrip),
+                ),
+                viewport_state: Some(ViewportState::viewport_dynamic_scissor_irrelevant()),
+                subpass: Some(Subpass::from(render_pass.clone(), 0).unwrap().into()),
+                rasterization_state: Some(RasterizationState::new()),
+                multisample_state: Some(MultisampleState::new()),
+                color_blend_state: Some(ColorBlendState::new(1)),
+                ..GraphicsPipelineCreateInfo::layout(layout)
+            },
+        )?;
+        log::info!("after");
         let init_params = ProjectionParameters {
             mode: ProjectionMode::FromCamera, // This means `eyeOffset` should be zero, which would
             // be what is returned by `bytemuck::Zeroable`
@@ -349,6 +379,7 @@ impl<DSA: DescriptorSetAlloc + 'static> Projection<DSA> {
                     ),
                     WriteDescriptorSet::buffer(2, tex_offsets[i].clone()),
                 ],
+                None,
             )?)
         })?;
         Ok(Self {
@@ -366,7 +397,7 @@ impl<DSA: DescriptorSetAlloc + 'static> Projection<DSA> {
         cmdbuf_allocator: &StandardCommandBufferAllocator,
         after: impl GpuFuture,
         queue: &Arc<Queue>,
-        output: Arc<dyn ImageAccess>,
+        output: Arc<Image>,
     ) -> Result<impl GpuFuture> {
         let framebuffer = Framebuffer::new(
             self.render_pass.clone(),
@@ -379,7 +410,7 @@ impl<DSA: DescriptorSetAlloc + 'static> Projection<DSA> {
             },
         )?;
         let ProjectionParameters { overlay_width, .. } = &self.saved_parameters;
-        let [w, h] = self.source.dimensions().width_height();
+        let [w, h, _] = self.source.extent();
         let mut cmdbuf = AutoCommandBufferBuilder::primary(
             cmdbuf_allocator,
             queue.queue_family_index(),
@@ -395,7 +426,8 @@ impl<DSA: DescriptorSetAlloc + 'static> Projection<DSA> {
                 ..Default::default()
             },
             AllocationCreateInfo {
-                usage: MemoryUsage::Upload,
+                memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE
+                    | MemoryTypeFilter::PREFER_DEVICE,
                 allocate_preference: MemoryAllocatePreference::Unknown,
                 ..Default::default()
             },
@@ -426,49 +458,65 @@ impl<DSA: DescriptorSetAlloc + 'static> Projection<DSA> {
         let mut render_pass_begin_info = RenderPassBeginInfo::framebuffer(framebuffer.clone());
         render_pass_begin_info.clear_values = vec![None];
         cmdbuf
-            .begin_render_pass(render_pass_begin_info, SubpassContents::Inline)?
+            .begin_render_pass(
+                render_pass_begin_info,
+                SubpassBeginInfo {
+                    contents: SubpassContents::Inline,
+                    ..Default::default()
+                },
+            )?
             .set_viewport(
                 0,
-                [Viewport {
-                    origin: [0.0, 0.0],
-                    dimensions: [(w / 2) as f32, h as f32],
-                    depth_range: 0.0..1.0,
-                }],
-            )
-            .bind_pipeline_graphics(self.pipeline.clone())
+                Some(Viewport {
+                    offset: [0.0, 0.0],
+                    extent: [(w / 2) as f32, h as f32],
+                    depth_range: 0.0..=1.0,
+                })
+                .into_iter()
+                .collect(),
+            )?
+            .bind_pipeline_graphics(self.pipeline.clone())?
             .bind_descriptor_sets(
                 PipelineBindPoint::Graphics,
                 self.pipeline.layout().clone(),
                 0,
                 self.desc_sets[0].clone(),
-            )
-            .bind_vertex_buffers(0, vertex_buffer.clone())
+            )?
+            .bind_vertex_buffers(0, vertex_buffer.clone())?
             .draw(vertex_buffer.len() as u32, 1, 0, 0)?
-            .end_render_pass()?;
+            .end_render_pass(SubpassEndInfo::default())?;
 
         // Right
         let mut render_pass_begin_info = RenderPassBeginInfo::framebuffer(framebuffer);
         render_pass_begin_info.clear_values = vec![None];
         cmdbuf
-            .begin_render_pass(render_pass_begin_info, SubpassContents::Inline)?
+            .begin_render_pass(
+                render_pass_begin_info,
+                SubpassBeginInfo {
+                    contents: SubpassContents::Inline,
+                    ..Default::default()
+                },
+            )?
             .set_viewport(
                 0,
-                [Viewport {
-                    origin: [(w / 2) as f32, 0.0],
-                    dimensions: [(w / 2) as f32, h as f32],
-                    depth_range: 0.0..1.0,
-                }],
-            )
-            .bind_pipeline_graphics(self.pipeline.clone())
+                Some(Viewport {
+                    offset: [(w / 2) as f32, 0.0],
+                    extent: [(w / 2) as f32, h as f32],
+                    depth_range: 0.0..=1.0,
+                })
+                .into_iter()
+                .collect(),
+            )?
+            .bind_pipeline_graphics(self.pipeline.clone())?
             .bind_descriptor_sets(
                 PipelineBindPoint::Graphics,
                 self.pipeline.layout().clone(),
                 0,
                 self.desc_sets[1].clone(),
-            )
-            .bind_vertex_buffers(0, vertex_buffer.clone())
+            )?
+            .bind_vertex_buffers(0, vertex_buffer.clone())?
             .draw(vertex_buffer.len() as u32, 1, 0, 0)?
-            .end_render_pass()?;
+            .end_render_pass(SubpassEndInfo::default())?;
         Ok(after.then_execute(queue.clone(), cmdbuf.build()?)?)
     }
 }

@@ -5,30 +5,34 @@ use vulkano::{
     buffer::{Buffer, BufferCreateInfo, BufferUsage},
     command_buffer::{
         allocator::StandardCommandBufferAllocator, AutoCommandBufferBuilder,
-        CommandBufferUsage::OneTimeSubmit, RenderPassBeginInfo, SubpassContents,
+        CommandBufferUsage::OneTimeSubmit, RenderPassBeginInfo, SubpassBeginInfo, SubpassContents,
+        SubpassEndInfo,
     },
     descriptor_set::{
         allocator::StandardDescriptorSetAllocator, PersistentDescriptorSet, WriteDescriptorSet,
     },
     device::{Device, Queue},
     image::{
+        sampler::{Filter, Sampler, SamplerCreateInfo},
         view::{ImageView, ImageViewCreateInfo},
-        AttachmentImage, ImageAccess,
+        Image, ImageLayout,
     },
     memory::allocator::{
-        AllocationCreateInfo, MemoryAllocatePreference, MemoryUsage, StandardMemoryAllocator,
+        AllocationCreateInfo, MemoryAllocatePreference, MemoryTypeFilter, StandardMemoryAllocator,
     },
     pipeline::{graphics::viewport::Viewport, PipelineBindPoint},
     pipeline::{
         graphics::{
             input_assembly::{InputAssemblyState, PrimitiveTopology},
-            vertex_input::Vertex as VertexTrait,
+            subpass::PipelineSubpassType,
+            vertex_input::{Vertex as VertexTrait, VertexDefinition},
             viewport::ViewportState,
+            GraphicsPipelineCreateInfo, rasterization::RasterizationState, multisample::MultisampleState, color_blend::ColorBlendState,
         },
-        GraphicsPipeline, Pipeline,
+        layout::PipelineDescriptorSetLayoutCreateInfo,
+        GraphicsPipeline, Pipeline, PipelineLayout, PipelineShaderStageCreateInfo,
     },
     render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass},
-    sampler::{Filter, Sampler, SamplerCreateInfo},
     sync::GpuFuture,
     Handle, VulkanObject,
 };
@@ -132,17 +136,25 @@ impl StereoCorrection {
     }
     /// Input size is (size * 2, size)
     /// returns also the adjusted FOV for left and right
+    ///
+    /// # Arguments
+    ///
+    /// - is_final: whether this is the final stage of the pipeline.
+    ///             if true, the output image will be submitted to
+    ///             the vr compositor.
     pub fn new(
         device: Arc<Device>,
         allocator: &StandardMemoryAllocator,
         descriptor_set_allocator: &StandardDescriptorSetAllocator,
-        input: Arc<AttachmentImage>,
+        input: Arc<Image>,
         camera_calib: &crate::vrapi::StereoCamera,
+        is_final: bool,
     ) -> Result<Self> {
-        if input.dimensions().width() != input.dimensions().height() * 2 {
+        let [w, h, _] = input.extent();
+        if w != h * 2 {
             return Err(anyhow!("Input not square"));
         }
-        let size = input.dimensions().height() as f64;
+        let size = h as f64;
         let center_left = [
             camera_calib.left.intrinsics.center_x / size,
             camera_calib.left.intrinsics.center_y / size,
@@ -167,10 +179,10 @@ impl StereoCorrection {
             vulkano::single_pass_renderpass!(device.clone(),
                 attachments: {
                     color: {
-                        load: DontCare,
-                        store: Store,
                         format: vulkano::format::Format::R8G8B8A8_UNORM,
                         samples: 1,
+                        load_op: DontCare,
+                        store_op: Store,
                     }
                 },
                 pass: {
@@ -181,10 +193,15 @@ impl StereoCorrection {
             vulkano::single_pass_renderpass!(device.clone(),
                 attachments: {
                     color: {
-                        load: Load,
-                        store: Store,
                         format: vulkano::format::Format::R8G8B8A8_UNORM,
                         samples: 1,
+                        load_op: Load,
+                        store_op: Store,
+                        final_layout: if is_final {
+                            ImageLayout::TransferSrcOptimal
+                        } else {
+                            ImageLayout::ColorAttachmentOptimal
+                        },
                     }
                 },
                 pass: {
@@ -193,23 +210,46 @@ impl StereoCorrection {
                 }
             )?,
         ];
+        let vs = vs.entry_point("main").unwrap();
+        let fs = fs.entry_point("main").unwrap();
+        let stages = [
+            PipelineShaderStageCreateInfo::new(vs.clone()),
+            PipelineShaderStageCreateInfo::new(fs),
+        ];
+        let layout = PipelineLayout::new(
+            device.clone(),
+            PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages)
+                .into_pipeline_layout_create_info(device.clone())?,
+        )?;
         let pipelines = [0, 1].try_map(|id| {
-            GraphicsPipeline::start()
-                .vertex_input_state(Vertex::per_vertex())
-                .vertex_shader(vs.entry_point("main").unwrap(), ())
-                .input_assembly_state(
-                    InputAssemblyState::new().topology(PrimitiveTopology::TriangleStrip),
-                )
-                .viewport_state(ViewportState::viewport_fixed_scissor_irrelevant([
-                    Viewport {
-                        origin: [size as f32 * id as f32, 0.0],
-                        dimensions: [size as f32, size as f32],
-                        depth_range: 0.0..1.0,
-                    },
-                ]))
-                .fragment_shader(fs.entry_point("main").unwrap(), ())
-                .render_pass(Subpass::from(render_passes[id].clone(), 0).unwrap())
-                .build(device.clone())
+            GraphicsPipeline::new(
+                device.clone(),
+                None,
+                GraphicsPipelineCreateInfo {
+                    stages: stages[..].into(),
+                    vertex_input_state: Some(
+                        Vertex::per_vertex().definition(&vs.info().input_interface)?,
+                    ),
+                    input_assembly_state: Some(
+                        InputAssemblyState::new().topology(PrimitiveTopology::TriangleStrip),
+                    ),
+                    viewport_state: Some(ViewportState::viewport_fixed_scissor_irrelevant([
+                        Viewport {
+                            offset: [size as f32 * id as f32, 0.0],
+                            extent: [size as f32, size as f32],
+                            depth_range: 0.0..=1.0,
+                        },
+                    ])),
+                    subpass: Some(PipelineSubpassType::BeginRenderPass(
+                        Subpass::from(render_passes[id].clone(), 0).unwrap(),
+                    )),
+                    rasterization_state: Some(RasterizationState::new()),
+                    multisample_state: Some(MultisampleState::new()),
+                    color_blend_state: Some(ColorBlendState::new(1)),
+                    ..GraphicsPipelineCreateInfo::layout(layout.clone())
+                },
+            )
+            .map_err(anyhow::Error::from)
         })?;
         let sampler = Sampler::new(
             device.clone(),
@@ -244,7 +284,8 @@ impl StereoCorrection {
                     ..Default::default()
                 },
                 AllocationCreateInfo {
-                    usage: MemoryUsage::Upload,
+                    memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE
+                        | MemoryTypeFilter::PREFER_DEVICE,
                     allocate_preference: MemoryAllocatePreference::Unknown,
                     ..Default::default()
                 },
@@ -262,6 +303,7 @@ impl StereoCorrection {
                         sampler.clone(),
                     ),
                 ],
+                None,
             )?)
         })?;
 
@@ -282,7 +324,7 @@ impl StereoCorrection {
         allocator: &StandardMemoryAllocator,
         after: impl GpuFuture,
         queue: &Arc<Queue>,
-        output: Arc<dyn ImageAccess>,
+        output: Arc<Image>,
     ) -> Result<impl GpuFuture> {
         use vulkano::device::DeviceOwned;
         if queue.device() != &self.device {
@@ -305,7 +347,8 @@ impl StereoCorrection {
                 ..Default::default()
             },
             AllocationCreateInfo {
-                usage: MemoryUsage::Upload,
+                memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE
+                    | MemoryTypeFilter::PREFER_DEVICE,
                 allocate_preference: MemoryAllocatePreference::Unknown,
                 ..Default::default()
             },
@@ -343,17 +386,23 @@ impl StereoCorrection {
             let mut render_pass_begin_info = RenderPassBeginInfo::framebuffer(framebuffer);
             render_pass_begin_info.clear_values = vec![None];
             cmdbuf
-                .begin_render_pass(render_pass_begin_info, SubpassContents::Inline)?
-                .bind_pipeline_graphics(self.pipelines[id].clone())
+                .begin_render_pass(
+                    render_pass_begin_info,
+                    SubpassBeginInfo {
+                        contents: SubpassContents::Inline,
+                        ..Default::default()
+                    },
+                )?
+                .bind_pipeline_graphics(self.pipelines[id].clone())?
                 .bind_descriptor_sets(
                     PipelineBindPoint::Graphics,
                     self.pipelines[id].layout().clone(),
                     0,
                     self.desc_sets[id].clone(),
-                )
-                .bind_vertex_buffers(0, vertex_buffer.clone())
+                )?
+                .bind_vertex_buffers(0, vertex_buffer.clone())?
                 .draw(vertex_buffer.len() as u32, 1, 0, 0)?
-                .end_render_pass()?;
+                .end_render_pass(SubpassEndInfo::default())?;
         }
         Ok(after.then_execute(queue.clone(), cmdbuf.build()?)?)
     }

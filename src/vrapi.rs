@@ -1,10 +1,11 @@
 use nalgebra::Matrix4;
 use openvr_sys2::{ETrackedPropertyError, EVRInitError, EVRInputError, EVROverlayError};
+use openxr::ApplicationInfo;
 use std::{ffi::CString, mem::MaybeUninit, pin::Pin, sync::Arc};
 use vulkano::{
     device::{physical::PhysicalDevice, Device, Queue},
     instance::Instance,
-    Handle, VulkanObject,
+    Handle, VulkanObject, command_buffer::{sys::{UnsafeCommandBufferBuilder, CommandBufferBeginInfo}, allocator::StandardCommandBufferAllocator, CommandBufferLevel, CommandBufferUsage}, sync::{DependencyInfo, ImageMemoryBarrier, PipelineStages, AccessFlags}, image::{ImageLayout, ImageSubresourceRange, ImageAspects},
 };
 
 use serde::{Deserialize, Serialize};
@@ -81,7 +82,7 @@ pub(crate) trait Vr {
     type Error: std::error::Error + Send + Sync + 'static;
     fn hmd_transform(&self, time_offset: f32) -> nalgebra::Matrix4<f64>;
     fn required_extensions(&self, pdev: &PhysicalDevice) -> vulkano::device::DeviceExtensions;
-    fn target_device(&self, instance: &Arc<Instance>) -> Result<Arc<PhysicalDevice>, Self::Error>;
+    fn create_device(&self, instance: &Arc<Instance>) -> Result<Arc<PhysicalDevice>, Self::Error>;
     fn load_camera_paramter(&self) -> Option<StereoCamera>;
     fn ipd(&self) -> Result<f32, Self::Error>;
     fn eye_to_head(&self) -> [Matrix4<f64>; 2];
@@ -89,7 +90,8 @@ pub(crate) trait Vr {
         &mut self,
         w: u32,
         h: u32,
-        image: Arc<impl vulkano::image::ImageAccess + 'static>,
+        image: Arc<vulkano::image::Image>,
+        layout: ImageLayout,
         dev: Arc<Device>,
         queue: Arc<Queue>,
         instance: Arc<Instance>,
@@ -106,7 +108,7 @@ pub(crate) trait Vr {
 }
 
 struct TextureState {
-    _image: Arc<dyn vulkano::image::ImageAccess>,
+    _image: Arc<vulkano::image::Image>,
     _device: Arc<Device>,
     _queue: Arc<Queue>,
     _instance: Arc<Instance>,
@@ -182,13 +184,21 @@ pub(crate) enum OpenVrError {
     #[error("vulkan device not found")]
     VulkanDeviceNotFound,
     #[error("openvr init error: {0}")]
-    InitError(#[from] EVRInitError),
+    Init(#[from] EVRInitError),
     #[error("overlay error: {0}")]
-    OverlayError(#[from] EVROverlayError),
+    Overlay(#[from] EVROverlayError),
     #[error("tracked property error: {0}")]
-    TrackedPropertyError(#[from] ETrackedPropertyError),
+    TrackedProperty(#[from] ETrackedPropertyError),
     #[error("input error: {0}")]
-    InputError(#[from] EVRInputError),
+    Input(#[from] EVRInputError),
+    #[error("vulkan error: {0}")]
+    Vulkan(#[from] vulkano::VulkanError),
+    #[error("vulkan validation error: {0}")]
+    VulkanValidation(#[from] Box<vulkano::ValidationError>),
+    #[error("vulkan error: {0}")]
+    VulkanValidated(#[from] vulkano::Validated<vulkano::VulkanError>),
+    #[error("vulkan error: {0}")]
+    RawVulkan(#[from] ash::vk::Result)
 }
 
 impl Drop for OpenVr {
@@ -206,7 +216,7 @@ impl Vr for OpenVr {
     fn hmd_transform(&self, time_offset: f32) -> nalgebra::Matrix4<f64> {
         self.sys.hmd_transform(time_offset)
     }
-    fn target_device(&self, instance: &Arc<Instance>) -> Result<Arc<PhysicalDevice>, Self::Error> {
+    fn create_device(&self, instance: &Arc<Instance>) -> Result<Arc<PhysicalDevice>, Self::Error> {
         let mut target_device = 0u64;
         unsafe {
             self.sys.pin_mut().GetOutputDevice(
@@ -271,11 +281,69 @@ impl Vr for OpenVr {
         &mut self,
         w: u32,
         h: u32,
-        image: Arc<impl vulkano::image::ImageAccess + 'static>,
+        image: Arc<vulkano::image::Image>,
+        layout: ImageLayout,
         dev: Arc<Device>,
         queue: Arc<Queue>,
         instance: Arc<Instance>,
     ) -> Result<(), Self::Error> {
+        if layout != ImageLayout::TransferSrcOptimal {
+            let cmdbuf_allocator =
+                StandardCommandBufferAllocator::new(
+                    dev.clone(),
+                    Default::default(),
+                );
+            let cmdbuf = unsafe {
+                let mut builder = UnsafeCommandBufferBuilder::new(
+                    &cmdbuf_allocator,
+                    queue.queue_family_index(),
+                    CommandBufferLevel::Primary,
+                    CommandBufferBeginInfo {
+                        usage: CommandBufferUsage::OneTimeSubmit,
+                        inheritance_info: None,
+                        ..Default::default()
+                    },
+                )?;
+                builder.pipeline_barrier(&DependencyInfo {
+                    image_memory_barriers: Some(ImageMemoryBarrier {
+                        src_stages: PipelineStages::ALL_TRANSFER,
+                        src_access: AccessFlags::TRANSFER_WRITE,
+                        dst_access: AccessFlags::TRANSFER_READ,
+                        dst_stages: PipelineStages::ALL_TRANSFER,
+                        old_layout: ImageLayout::ColorAttachmentOptimal,
+                        new_layout: ImageLayout::TransferSrcOptimal,
+                        subresource_range: ImageSubresourceRange {
+                            array_layers: 0..1,
+                            mip_levels: 0..1,
+                            aspects: ImageAspects::COLOR,
+                        },
+                        ..ImageMemoryBarrier::image(image.clone())
+                    })
+                    .into_iter()
+                    .collect(),
+                    ..Default::default()
+                })?;
+                builder.build()?
+            };
+            let fence = vulkano::sync::fence::Fence::new(
+                queue.device().clone(),
+                vulkano::sync::fence::FenceCreateInfo::default(),
+            )?;
+            let fns = queue.device().fns();
+            unsafe {
+                (fns.v1_0.queue_submit)(
+                    queue.handle(),
+                    1,
+                    [ash::vk::SubmitInfo::builder()
+                        .command_buffers(&[cmdbuf.handle()])
+                        .build()]
+                    .as_ptr(),
+                    fence.handle(),
+                )
+            }
+            .result()?;
+            fence.wait(None)?;
+        }
         let texture = TextureState {
             _image: image.clone() as Arc<_>,
             _device: dev.clone(),
@@ -292,7 +360,7 @@ impl Vr for OpenVr {
             m_nHeight: h,
             m_nFormat: image.format() as u32,
             m_nSampleCount: image.samples() as u32,
-            m_nImage: image.inner().image.handle().as_raw(),
+            m_nImage: image.handle().as_raw(),
             m_pPhysicalDevice: dev.physical_device().handle().as_raw() as *mut _,
             m_pDevice: dev.handle().as_raw() as *mut _,
             m_pQueue: queue.handle().as_raw() as *mut _,
@@ -456,5 +524,115 @@ impl Vr for OpenVr {
             action_data.assume_init()
         };
         Ok(action_data.bState)
+    }
+}
+
+pub(crate) struct OpenXr {
+    entry: openxr::Entry,
+    instance: openxr::Instance,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum OpenXrError {
+    #[error("cannot load openxr loader: {0}")]
+    Load(#[from] openxr::LoadError),
+    #[error("xr: {0}")]
+    Xr(#[from] openxr::sys::Result),
+}
+
+impl OpenXr {
+    pub(crate) fn new() -> Result<Self, OpenXrError> {
+        let entry = unsafe { openxr::Entry::load()? };
+        let mut extension = openxr::ExtensionSet::default();
+        extension.extx_overlay = true;
+        extension.khr_vulkan_enable2 = true;
+        let instance = entry.create_instance(
+            &ApplicationInfo {
+                application_name: crate::APP_NAME,
+                application_version: crate::APP_VERSION,
+                engine_name: "engine",
+                engine_version: 0,
+            },
+            &extension,
+            &[],
+        )?;
+        Ok(Self { entry, instance })
+    }
+}
+
+impl Vr for OpenXr {
+    fn acknowledge_quit(&mut self) {
+        // intentionally left blank
+    }
+
+    type Error = OpenXrError;
+
+    fn hmd_transform(&self, time_offset: f32) -> nalgebra::Matrix4<f64> {
+        todo!()
+    }
+
+    fn required_extensions(&self, pdev: &PhysicalDevice) -> vulkano::device::DeviceExtensions {
+        todo!()
+    }
+
+    fn create_device(&self, instance: &Arc<Instance>) -> Result<Arc<PhysicalDevice>, Self::Error> {
+        todo!()
+    }
+
+    fn load_camera_paramter(&self) -> Option<StereoCamera> {
+        todo!()
+    }
+
+    fn ipd(&self) -> Result<f32, Self::Error> {
+        todo!()
+    }
+
+    fn eye_to_head(&self) -> [Matrix4<f64>; 2] {
+        todo!()
+    }
+
+    fn set_overlay_texture(
+        &mut self,
+        w: u32,
+        h: u32,
+        image: Arc<vulkano::image::Image>,
+        layout: ImageLayout,
+        dev: Arc<Device>,
+        queue: Arc<Queue>,
+        instance: Arc<Instance>,
+    ) -> Result<(), Self::Error> {
+        todo!()
+    }
+
+    fn set_overlay_texture_bounds(&mut self, bounds: Bounds) -> Result<(), Self::Error> {
+        todo!()
+    }
+
+    fn set_overlay_stereo(&mut self, stereo: bool) -> Result<(), Self::Error> {
+        todo!()
+    }
+
+    fn show_overlay(&mut self) -> Result<(), Self::Error> {
+        todo!()
+    }
+
+    fn hide_overlay(&mut self) -> Result<(), Self::Error> {
+        todo!()
+    }
+
+    fn set_overlay_transformation(&mut self, transform: Matrix4<f64>) -> Result<(), Self::Error> {
+        todo!()
+    }
+
+    fn poll_next_event(&mut self) -> Option<Event> {
+        todo!()
+    }
+
+    fn update_action_state(&mut self) -> Result<(), Self::Error> {
+        todo!()
+    }
+
+    fn get_action_state(&self, action: Action) -> Result<bool, Self::Error> {
+        todo!()
     }
 }

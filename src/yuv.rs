@@ -2,36 +2,36 @@ use anyhow::{anyhow, Result};
 use std::sync::Arc;
 use vulkano::{
     buffer::{Buffer, BufferCreateInfo, BufferUsage},
-    command_buffer::SubpassContents,
     command_buffer::{
         allocator::StandardCommandBufferAllocator, AutoCommandBufferBuilder,
-        CommandBufferUsage::OneTimeSubmit, RenderPassBeginInfo,
+        CommandBufferUsage::OneTimeSubmit, RenderPassBeginInfo, SubpassEndInfo,
     },
+    command_buffer::{SubpassBeginInfo, SubpassContents},
     descriptor_set::{
         allocator::StandardDescriptorSetAllocator, persistent::PersistentDescriptorSet,
         WriteDescriptorSet,
     },
     device::{Device, DeviceOwned, Queue},
+    image::sampler::{Filter, Sampler, SamplerCreateInfo},
     image::view::{ImageView, ImageViewCreateInfo},
-    image::{view::ImageViewCreationError, AttachmentImage, ImageAccess},
+    image::Image,
     memory::allocator::{
-        AllocationCreateInfo, MemoryAllocatePreference, MemoryUsage, StandardMemoryAllocator,
+        AllocationCreateInfo, MemoryAllocatePreference, MemoryTypeFilter, StandardMemoryAllocator,
     },
     pipeline::{
         graphics::{
             input_assembly::{InputAssemblyState, PrimitiveTopology},
-            vertex_input::Vertex as VertexTrait,
+            vertex_input::{Vertex as VertexTrait, VertexDefinition},
             viewport::{Viewport, ViewportState},
-            GraphicsPipelineCreationError,
+            GraphicsPipelineCreateInfo, rasterization::RasterizationState, multisample::MultisampleState, color_blend::ColorBlendState,
         },
-        GraphicsPipeline, Pipeline, PipelineBindPoint,
+        layout::PipelineDescriptorSetLayoutCreateInfo,
+        GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineLayout,
+        PipelineShaderStageCreateInfo,
     },
-    render_pass::{
-        Framebuffer, FramebufferCreateInfo, FramebufferCreationError, RenderPass, Subpass,
-    },
-    sampler::{Filter, Sampler, SamplerCreateInfo},
+    render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass},
     sync::GpuFuture,
-    Handle, OomError, VulkanObject,
+    Handle, VulkanObject,
 };
 
 mod vs {
@@ -64,20 +64,6 @@ struct Vertex {
 pub enum ConverterError {
     #[error("something went wrong: {0}")]
     Anyhow(#[from] anyhow::Error),
-    #[error("{0}")]
-    VkOom(#[from] OomError),
-    #[error("{0}")]
-    GraphicsPipelineCreationError(#[from] GraphicsPipelineCreationError),
-    //#[error("{0}")]
-    //ImageCreationError(#[from] ImageCreationError),
-    #[error("{0}")]
-    ImageViewCreationError(#[from] ImageViewCreationError),
-    //#[error("{0}")]
-    //DescriptorSetError(#[from] DescriptorSetError),
-    //#[error("{0}")]
-    //CopyBufferImageError(#[from] CopyBufferImageError),
-    #[error("{0}")]
-    FramebufferCreationError(#[from] FramebufferCreationError),
 }
 
 pub struct GpuYuyvConverter {
@@ -108,7 +94,7 @@ impl GpuYuyvConverter {
         descriptor_set_allocator: &StandardDescriptorSetAllocator,
         w: u32,
         h: u32,
-        input: &Arc<AttachmentImage>,
+        input: &Arc<Image>,
     ) -> Result<Self> {
         if w % 2 != 0 {
             return Err(anyhow!("Width can't be odd"));
@@ -118,10 +104,10 @@ impl GpuYuyvConverter {
         let render_pass = vulkano::single_pass_renderpass!(device.clone(),
             attachments: {
                 color: {
-                    load: DontCare,
-                    store: Store,
                     format: vulkano::format::Format::R8G8B8A8_UNORM,
                     samples: 1,
+                    load_op: DontCare,
+                    store_op: Store,
                 }
             },
             pass: {
@@ -129,22 +115,42 @@ impl GpuYuyvConverter {
                 depth_stencil: {}
             }
         )?;
-        let pipeline = GraphicsPipeline::start()
-            .vertex_input_state(Vertex::per_vertex())
-            .vertex_shader(vs.entry_point("main").unwrap(), ())
-            .input_assembly_state(
-                InputAssemblyState::new().topology(PrimitiveTopology::TriangleStrip),
-            )
-            .viewport_state(ViewportState::viewport_fixed_scissor_irrelevant([
-                Viewport {
-                    origin: [0.0, 0.0],
-                    dimensions: [w as f32, h as f32],
-                    depth_range: 0.0..1.0,
-                },
-            ]))
-            .fragment_shader(fs.entry_point("main").unwrap(), ())
-            .render_pass(Subpass::from(render_pass.clone(), 0).unwrap())
-            .build(device.clone())?;
+        let vs = vs.entry_point("main").unwrap();
+        let fs = fs.entry_point("main").unwrap();
+        let stages = [
+            PipelineShaderStageCreateInfo::new(vs.clone()),
+            PipelineShaderStageCreateInfo::new(fs),
+        ];
+        let layout = PipelineLayout::new(
+            device.clone(),
+            PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages)
+                .into_pipeline_layout_create_info(device.clone())?,
+        )?;
+        let pipeline = GraphicsPipeline::new(
+            device.clone(),
+            None,
+            GraphicsPipelineCreateInfo {
+                vertex_input_state: Some(
+                    Vertex::per_vertex().definition(&vs.info().input_interface)?,
+                ),
+                stages: stages.into_iter().collect(),
+                input_assembly_state: Some(
+                    InputAssemblyState::new().topology(PrimitiveTopology::TriangleStrip),
+                ),
+                viewport_state: Some(ViewportState::viewport_fixed_scissor_irrelevant([
+                    Viewport {
+                        offset: [0.0, 0.0],
+                        extent: [w as f32, h as f32],
+                        depth_range: 0.0..=1.0,
+                    },
+                ])),
+                subpass: Some(Subpass::from(render_pass.clone(), 0).unwrap().into()),
+                rasterization_state: Some(RasterizationState::new()),
+                multisample_state: Some(MultisampleState::new()),
+                color_blend_state: Some(ColorBlendState::new(1)),
+                ..GraphicsPipelineCreateInfo::layout(layout)
+            },
+        )?;
         let sampler = Sampler::new(
             device.clone(),
             SamplerCreateInfo {
@@ -162,6 +168,7 @@ impl GpuYuyvConverter {
                 ImageView::new(input.clone(), ImageViewCreateInfo::from_image(&input))?,
                 sampler,
             )],
+            None,
         )?;
         Ok(Self {
             render_pass,
@@ -182,7 +189,7 @@ impl GpuYuyvConverter {
         cmdbuf_allocator: &StandardCommandBufferAllocator,
         after: impl GpuFuture,
         queue: &Arc<Queue>,
-        output: Arc<dyn ImageAccess>,
+        output: Arc<Image>,
     ) -> Result<impl GpuFuture> {
         if queue.device() != &self.device
             || allocator.device() != &self.device
@@ -208,7 +215,8 @@ impl GpuYuyvConverter {
                 ..Default::default()
             },
             AllocationCreateInfo {
-                usage: MemoryUsage::Upload,
+                memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE
+                    | MemoryTypeFilter::PREFER_DEVICE,
                 allocate_preference: MemoryAllocatePreference::Unknown,
                 ..Default::default()
             },
@@ -243,19 +251,25 @@ impl GpuYuyvConverter {
         let mut render_pass_begin_info = RenderPassBeginInfo::framebuffer(framebuffer);
         render_pass_begin_info.clear_values = vec![None];
         cmdbuf
-            .begin_render_pass(render_pass_begin_info, SubpassContents::Inline)
+            .begin_render_pass(
+                render_pass_begin_info,
+                SubpassBeginInfo {
+                    contents: SubpassContents::Inline,
+                    ..Default::default()
+                },
+            )
             .map_err(|e| ConverterError::Anyhow(e.into()))?
-            .bind_pipeline_graphics(self.pipeline.clone())
+            .bind_pipeline_graphics(self.pipeline.clone())?
             .bind_descriptor_sets(
                 PipelineBindPoint::Graphics,
                 self.pipeline.layout().clone(),
                 0,
                 self.desc_set.clone(),
-            )
-            .bind_vertex_buffers(0, vertex_buffer.clone())
+            )?
+            .bind_vertex_buffers(0, vertex_buffer.clone())?
             .draw(vertex_buffer.len() as u32, 1, 0, 0)
             .map_err(|e| ConverterError::Anyhow(e.into()))?
-            .end_render_pass()
+            .end_render_pass(SubpassEndInfo::default())
             .map_err(|e| ConverterError::Anyhow(e.into()))?;
         Ok(after.then_execute(
             queue.clone(),

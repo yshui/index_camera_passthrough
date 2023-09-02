@@ -12,13 +12,18 @@ use vulkano::{
     descriptor_set::allocator::{StandardDescriptorSetAlloc, StandardDescriptorSetAllocator},
     device::{Device, DeviceOwned},
     format::Format,
-    image::{immutable::ImmutableImageInitialization, AttachmentImage, ImageAccess, ImageUsage},
+    image::{Image as VkImage, ImageCreateInfo, ImageUsage},
     memory::allocator::{
-        AllocationCreateInfo, MemoryAllocator, MemoryUsage, StandardMemoryAllocator,
+        AllocationCreateInfo, MemoryAllocator, MemoryTypeFilter, StandardMemoryAllocator,
     },
     sync::GpuFuture,
     Handle, VulkanObject,
 };
+
+pub(crate) struct Image {
+    pub image: VkImage,
+    pub final_layout: Option<vulkano::image::ImageLayout>,
+}
 
 pub(crate) struct Pipeline {
     yuv: Option<crate::yuv::GpuYuyvConverter>,
@@ -29,8 +34,8 @@ pub(crate) struct Pipeline {
     render_doc: Option<renderdoc::RenderDoc<renderdoc::V100>>,
     cmdbuf_allocator: StandardCommandBufferAllocator,
     memory_allocator: StandardMemoryAllocator,
-    yuv_texture: Arc<AttachmentImage>,
-    textures: [Arc<AttachmentImage>; 2],
+    yuv_texture: Arc<VkImage>,
+    textures: [Arc<VkImage>; 2],
     ipd: f32,
     camera_config: Option<crate::vrapi::StereoCamera>,
 }
@@ -44,16 +49,10 @@ impl std::fmt::Debug for Pipeline {
             .field("projection_params", &self.projection_params)
             .field("capture", &self.capture)
             .field("render_doc", &self.render_doc)
-            .field(
-                "yuv_texture",
-                &self.yuv_texture.inner().image.handle().as_raw(),
-            )
+            .field("yuv_texture", &self.yuv_texture.handle().as_raw())
             .field(
                 "textures",
-                &self
-                    .textures
-                    .each_ref()
-                    .map(|t| t.inner().image.handle().as_raw()),
+                &self.textures.each_ref().map(|t| t.handle().as_raw()),
             )
             .field("ipd", &self.ipd)
             .field("camera_config", &self.camera_config)
@@ -65,10 +64,10 @@ use crate::{config::DisplayMode, CAMERA_SIZE};
 
 pub(crate) fn submit_cpu_image(
     img: &[u8],
-    cmdbuf_allocator: &impl CommandBufferAllocator,
+    cmdbuf_allocator: &(impl CommandBufferAllocator + 'static),
     allocator: &impl MemoryAllocator,
     queue: &Arc<vulkano::device::Queue>,
-    output: Arc<dyn ImageAccess>,
+    output: Arc<VkImage>,
 ) -> Result<impl GpuFuture> {
     let buffer = Buffer::new_slice::<u8>(
         allocator,
@@ -77,7 +76,8 @@ pub(crate) fn submit_cpu_image(
             ..Default::default()
         },
         AllocationCreateInfo {
-            usage: MemoryUsage::Upload,
+            memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE
+                | MemoryTypeFilter::PREFER_DEVICE,
             allocate_preference: vulkano::memory::allocator::MemoryAllocatePreference::Unknown,
             ..Default::default()
         },
@@ -111,8 +111,10 @@ unsafe impl<L: GpuFuture, R: GpuFuture> GpuFuture for EitherGpuFuture<L, R> {
     #[inline]
     unsafe fn build_submission(
         &self,
-    ) -> std::result::Result<vulkano::sync::future::SubmitAnyBuilder, vulkano::sync::FlushError>
-    {
+    ) -> std::result::Result<
+        vulkano::sync::future::SubmitAnyBuilder,
+        vulkano::Validated<vulkano::VulkanError>,
+    > {
         match self {
             EitherGpuFuture::Left(l) => l.build_submission(),
             EitherGpuFuture::Right(r) => r.build_submission(),
@@ -142,7 +144,7 @@ unsafe impl<L: GpuFuture, R: GpuFuture> GpuFuture for EitherGpuFuture<L, R> {
     }
 
     #[inline]
-    fn flush(&self) -> std::result::Result<(), vulkano::sync::FlushError> {
+    fn flush(&self) -> std::result::Result<(), vulkano::Validated<vulkano::VulkanError>> {
         match self {
             EitherGpuFuture::Left(l) => l.flush(),
             EitherGpuFuture::Right(r) => r.flush(),
@@ -176,7 +178,7 @@ unsafe impl<L: GpuFuture, R: GpuFuture> GpuFuture for EitherGpuFuture<L, R> {
     #[inline]
     fn check_image_access(
         &self,
-        image: &vulkano::image::sys::Image,
+        image: &vulkano::image::Image,
         range: std::ops::Range<vulkano::DeviceSize>,
         exclusive: bool,
         expected_layout: vulkano::image::ImageLayout,
@@ -228,25 +230,39 @@ impl Pipeline {
         let descriptor_set_allocator = StandardDescriptorSetAllocator::new(device.clone());
         let allocator = StandardMemoryAllocator::new_default(device.clone());
         // Allocate intermediate textures
-        let yuv_texture = AttachmentImage::with_usage(
+        let yuv_texture = VkImage::new(
             &allocator,
-            [CAMERA_SIZE, CAMERA_SIZE],
-            Format::R8G8B8A8_UNORM,
-            ImageUsage::TRANSFER_DST
-                | ImageUsage::TRANSFER_SRC
-                | ImageUsage::SAMPLED
-                | ImageUsage::COLOR_ATTACHMENT,
+            ImageCreateInfo {
+                extent: [CAMERA_SIZE, CAMERA_SIZE, 1],
+                format: Format::R8G8B8A8_UNORM,
+                usage: ImageUsage::TRANSFER_DST
+                    | ImageUsage::TRANSFER_SRC
+                    | ImageUsage::SAMPLED
+                    | ImageUsage::COLOR_ATTACHMENT,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE
+                    | MemoryTypeFilter::PREFER_DEVICE,
+                ..Default::default()
+            },
         )?;
-        device.set_debug_utils_object_name(&yuv_texture.inner().image, Some("yuv_texture"))?;
+        device.set_debug_utils_object_name(&yuv_texture, Some("yuv_texture"))?;
         let textures = [0, 1].try_map(|id| {
-            let tex = AttachmentImage::with_usage(
+            let tex = VkImage::new(
                 &allocator,
-                [CAMERA_SIZE * 2, CAMERA_SIZE],
-                Format::R8G8B8A8_UNORM,
-                ImageUsage::SAMPLED | ImageUsage::COLOR_ATTACHMENT,
+                ImageCreateInfo {
+                    extent: [CAMERA_SIZE * 2, CAMERA_SIZE, 1],
+                    format: Format::R8G8B8A8_UNORM,
+                    usage: ImageUsage::SAMPLED | ImageUsage::COLOR_ATTACHMENT,
+                    ..Default::default()
+                },
+                AllocationCreateInfo {
+                    memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
+                    ..Default::default()
+                },
             )?;
-            device
-                .set_debug_utils_object_name(&tex.inner().image, Some(&format!("texture{id}")))?;
+            device.set_debug_utils_object_name(&tex, Some(&format!("texture{id}")))?;
             anyhow::Ok(tex)
         })?;
         // if source is YUV: upload -> yuv_texture -> converter -> output_a
@@ -272,6 +288,7 @@ impl Pipeline {
                     &descriptor_set_allocator,
                     textures[0].clone(),
                     &cfg,
+                    matches!(display_mode, DisplayMode::Flat { .. }),
                 )
             })
             .transpose()?;
@@ -342,9 +359,8 @@ impl Pipeline {
         overlay_transform: &Matrix4<f64>,
         queue: &Arc<vulkano::device::Queue>,
         input: &[u8],
-        output: Arc<ImmutableImageInitialization>,
+        output: Arc<VkImage>,
     ) -> Result<impl GpuFuture> {
-        let output = output as Arc<dyn ImageAccess>;
         if self.capture {
             if let Some(rd) = self.render_doc.as_mut() {
                 log::info!("Start Capture");
@@ -355,9 +371,9 @@ impl Pipeline {
         // 1. submit image to GPU
         // 2. convert YUYV to RGB
         let texture = if self.projection.is_some() || self.correction.is_some() {
-            self.textures[0].clone() as Arc<dyn ImageAccess>
+            &self.textures[0]
         } else {
-            output.clone()
+            &output
         };
         let future = if let Some(converter) = &self.yuv {
             let future = submit_cpu_image(
@@ -394,7 +410,7 @@ impl Pipeline {
                 future,
                 queue,
                 if self.projection.is_some() {
-                    self.textures[1].clone() as Arc<dyn ImageAccess>
+                    self.textures[1].clone()
                 } else {
                     output.clone()
                 },
