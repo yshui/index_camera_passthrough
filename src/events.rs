@@ -40,7 +40,7 @@ impl State {
             delay,
         }
     }
-    pub(crate) fn handle<Vr: crate::vrapi::Vr>(&mut self, vrsys: &Vr) -> Result<(), Vr::Error> {
+    pub(crate) fn handle<Vr: crate::vrapi::Vr + ?Sized>(&mut self, vrsys: &Vr) -> Result<(), Vr::Error> {
         let mut button_pressed = 0;
         if vrsys.get_action_state(crate::vrapi::Action::Button1)? {
             button_pressed += 1;

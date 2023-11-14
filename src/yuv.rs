@@ -165,7 +165,7 @@ impl GpuYuyvConverter {
             desc_set_layout.clone(),
             [WriteDescriptorSet::image_view_sampler(
                 0,
-                ImageView::new(input.clone(), ImageViewCreateInfo::from_image(&input))?,
+                ImageView::new(input.clone(), ImageViewCreateInfo::from_image(input))?,
                 sampler,
             )],
             None,

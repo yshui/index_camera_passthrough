@@ -9,7 +9,7 @@
 //! Overlay Model: the overlay transform matrix we set
 //! HMD View: inverse of HMD pose
 //! Camera Project: estimated from camera calibration.
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use std::sync::Arc;
 use vulkano::{
     buffer::{
@@ -17,8 +17,8 @@ use vulkano::{
     },
     command_buffer::{
         allocator::StandardCommandBufferAllocator, AutoCommandBufferBuilder,
-        CommandBufferUsage::OneTimeSubmit, RenderPassBeginInfo, SubpassBeginInfo, SubpassContents,
-        SubpassEndInfo,
+        CommandBufferExecError, CommandBufferUsage::OneTimeSubmit, RenderPassBeginInfo,
+        SubpassBeginInfo, SubpassContents, SubpassEndInfo,
     },
     descriptor_set::{
         allocator::{DescriptorSetAlloc, DescriptorSetAllocator},
@@ -35,18 +35,21 @@ use vulkano::{
     },
     pipeline::{
         graphics::{
+            color_blend::ColorBlendState,
             input_assembly::{InputAssemblyState, PrimitiveTopology},
+            multisample::MultisampleState,
+            rasterization::RasterizationState,
             vertex_input::{Vertex as VertexTrait, VertexDefinition},
             viewport::{Viewport, ViewportState},
-            GraphicsPipelineCreateInfo, rasterization::RasterizationState, multisample::MultisampleState, color_blend::ColorBlendState,
+            GraphicsPipelineCreateInfo,
         },
-        layout::PipelineDescriptorSetLayoutCreateInfo,
+        layout::{IntoPipelineLayoutCreateInfoError, PipelineDescriptorSetLayoutCreateInfo},
         GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineLayout,
         PipelineShaderStageCreateInfo,
     },
     render_pass::{Framebuffer, RenderPass, Subpass},
-    sync::GpuFuture,
-    Handle, Validated, VulkanObject,
+    sync::{GpuFuture, HostAccessError},
+    Handle, Validated, VulkanError, VulkanObject,
 };
 mod vs {
     vulkano_shaders::shader! {
@@ -93,6 +96,8 @@ pub struct Projection<T> {
     // [0: left, 1: right]
     uniforms: Uniforms,
     saved_parameters: ProjectionParameters,
+    mode_ipd_changed: bool,
+    mvps_changed: bool,
     desc_sets: [Arc<PersistentDescriptorSet<T>>; 2],
 }
 impl<T> std::fmt::Debug for Projection<T> {
@@ -137,6 +142,28 @@ fn format_matrix<
     )
 }
 
+#[derive(thiserror::Error, Debug)]
+pub enum ProjectorError {
+    #[error("input image is not square {0}x{1}")]
+    NotSquare(u32, u32),
+    #[error("vulkan error {0}")]
+    Vulkan(#[from] Validated<VulkanError>),
+    #[error("{0}")]
+    CreateInfo(#[from] IntoPipelineLayoutCreateInfoError),
+    #[error("buffer allocation error: {0}")]
+    BufferAlloc(#[from] Validated<BufferAllocateError>),
+    #[error("host access error: {0}")]
+    HostAccess(#[from] HostAccessError),
+    #[error("command buffer execution error: {0}")]
+    CommandBuffer(#[from] CommandBufferExecError),
+}
+
+impl From<Box<vulkano::ValidationError>> for ProjectorError {
+    fn from(value: Box<vulkano::ValidationError>) -> Self {
+        Self::Vulkan(Validated::from(value))
+    }
+}
+
 use nalgebra::{matrix, Matrix4, RawStorage, Scalar};
 impl<DSA: DescriptorSetAlloc + 'static> Projection<DSA> {
     /// Calculate the _physical_ camera's MVP, for each eye.
@@ -144,16 +171,16 @@ impl<DSA: DescriptorSetAlloc + 'static> Projection<DSA> {
     /// fov_left/right = adjusted fovs, in ratio (not in pixels)
     /// frame_time = how long after the first frame is the current frame taken
     /// time_origin = instant when the first frame is taken
-    pub(crate) fn calculate_mvp(
-        &self,
-        mode: ProjectionMode,
+    pub(crate) fn update_mvps(
+        &mut self,
         overlay_transform: &Matrix4<f64>,
-        camera_calib: &Option<crate::vrapi::StereoCamera>,
         fov: &[[f64; 2]; 2],
         eye_to_head: &[Matrix4<f64>; 2],
         hmd_transform: &Matrix4<f64>,
-    ) -> (Matrix4<f32>, Matrix4<f32>) {
-        let left_extrinsics_position = camera_calib
+    ) -> Result<(), ProjectorError> {
+        let left_extrinsics_position = self
+            .saved_parameters
+            .camera_calib
             .map(|c| c.left.extrinsics.position)
             .unwrap_or_default();
         // Camera space to HMD space transform, based on physical measurements
@@ -163,7 +190,9 @@ impl<DSA: DescriptorSetAlloc + 'static> Projection<DSA> {
             0.0, 0.0, 1.0, -left_extrinsics_position[2];
             0.0, 0.0, 0.0, 1.0;
         ];
-        let right_extrinsics_position = camera_calib
+        let right_extrinsics_position = self
+            .saved_parameters
+            .camera_calib
             .map(|c| c.right.extrinsics.position)
             .unwrap_or_default();
         let right_cam: Matrix4<_> = matrix![
@@ -173,7 +202,7 @@ impl<DSA: DescriptorSetAlloc + 'static> Projection<DSA> {
             0.0, 0.0, 0.0, 1.0;
         ];
 
-        let (left_eye, right_eye) = match mode {
+        let (left_eye, right_eye) = match self.saved_parameters.mode {
             ProjectionMode::FromEye => (
                 hmd_transform * eye_to_head[0],
                 hmd_transform * eye_to_head[1],
@@ -203,28 +232,51 @@ impl<DSA: DescriptorSetAlloc + 'static> Projection<DSA> {
             0.0, 0.0, -1.0, 0.0;
             0.0, 0.0, 0.0, 1.0;
         ];
-        (
+        self.set_mvps([
             (camera_projection_left * left_view * overlay_transform).cast(),
             (camera_projection_right * right_view * overlay_transform).cast(),
-        )
+        ]);
+        Ok(())
     }
-    pub fn set_params(&mut self, params: &ProjectionParameters) -> Result<()> {
-        if &self.saved_parameters == params {
+    pub fn set_ipd(&mut self, ipd: f32) {
+        if self.saved_parameters.ipd == ipd {
+            return;
+        }
+
+        self.saved_parameters.ipd = ipd;
+        self.mode_ipd_changed = true;
+    }
+    fn set_mvps(&mut self, mvps: [Matrix4<f32>; 2]) {
+        if self.saved_parameters.mvps == mvps {
+            return;
+        }
+        self.saved_parameters.mvps = mvps;
+        self.mvps_changed = true;
+    }
+    pub fn set_mode(&mut self, mode: ProjectionMode) {
+        if self.saved_parameters.mode == mode {
+            return;
+        }
+        self.saved_parameters.mode = mode;
+        self.mode_ipd_changed = true;
+    }
+    pub fn recalculate_uniforms(&mut self) -> Result<(), ProjectorError> {
+        if !self.mode_ipd_changed && !self.mvps_changed {
             return Ok(());
         }
+
         let ProjectionParameters {
             mode,
-            overlay_width,
             ipd,
             mvps,
             camera_calib,
-        } = params;
-        assert_eq!(camera_calib, &self.saved_parameters.camera_calib);
-        let left_extrinsics_position = camera_calib
-            .map(|c| c.left.extrinsics.position)
-            .unwrap_or_default();
+            ..
+        } = &self.saved_parameters;
         let mut transforms_write = self.uniforms.transforms.each_ref().try_map(|u| u.write())?;
-        if mode != &self.saved_parameters.mode {
+        if self.mode_ipd_changed {
+            let left_extrinsics_position = camera_calib
+                .map(|c| c.left.extrinsics.position)
+                .unwrap_or_default();
             let eye_offset_left = if *mode == ProjectionMode::FromEye {
                 [
                     -left_extrinsics_position[0] as f32 - ipd / 2.0,
@@ -236,25 +288,15 @@ impl<DSA: DescriptorSetAlloc + 'static> Projection<DSA> {
             let eye_offset_right = [-eye_offset_left[0], eye_offset_left[1]];
             transforms_write[0].eyeOffset = eye_offset_left;
             transforms_write[1].eyeOffset = eye_offset_right;
-            self.saved_parameters.mode = *mode;
+            self.mode_ipd_changed = false;
         }
-
-        for ((mvp, saved_mvp), write) in mvps
-            .iter()
-            .zip(self.saved_parameters.mvps.iter_mut())
-            .zip(transforms_write.iter_mut())
-        {
-            if mvp != saved_mvp {
-                *saved_mvp = *mvp;
+        if self.mvps_changed {
+            for (mvp, write) in mvps.iter().zip(transforms_write.iter_mut()) {
                 write.mvp = *mvp.as_ref();
             }
+            self.mvps_changed = false;
         }
 
-        if overlay_width != &self.saved_parameters.overlay_width {
-            self.saved_parameters.overlay_width = *overlay_width;
-            transforms_write[0].overlayWidth = (*overlay_width).into();
-            transforms_write[1].overlayWidth = (*overlay_width).into();
-        }
         Ok(())
     }
     fn make_uniform_buffer<T: BufferContents>(
@@ -282,11 +324,12 @@ impl<DSA: DescriptorSetAlloc + 'static> Projection<DSA> {
         allocator: &impl vulkano::memory::allocator::MemoryAllocator,
         descriptor_set_allocator: &DSA2,
         source: &Arc<Image>,
+        overlay_width: f32,
         camera_calib: &Option<crate::vrapi::StereoCamera>,
-    ) -> Result<Self> {
+    ) -> Result<Self, ProjectorError> {
         let [w, h, _] = source.extent();
         if w != h * 2 {
-            return Err(anyhow!("Input not square"));
+            return Err(ProjectorError::NotSquare(w, h));
         }
         let vs = vs::load(device.clone())?;
         let fs = fs::load(device.clone())?;
@@ -328,13 +371,20 @@ impl<DSA: DescriptorSetAlloc + 'static> Projection<DSA> {
         )?;
         let transforms =
             [vs::Transform::default(); 2].try_map(|u| Self::make_uniform_buffer(allocator, u))?;
+        {
+            let mut transform_writes = [transforms[0].write()?, transforms[1].write()?];
+            transform_writes[0].overlayWidth = overlay_width.into();
+            transform_writes[1].overlayWidth = overlay_width.into();
+        }
         log::info!("before");
         let pipeline = GraphicsPipeline::new(
             device.clone(),
             None,
             GraphicsPipelineCreateInfo {
                 vertex_input_state: Some(
-                    Vertex::per_vertex().definition(&vs.info().input_interface)?,
+                    Vertex::per_vertex()
+                        .definition(&vs.info().input_interface)
+                        .map_err(Validated::<VulkanError>::from)?,
                 ),
                 stages: stages.into_iter().collect(),
                 input_assembly_state: Some(
@@ -353,7 +403,7 @@ impl<DSA: DescriptorSetAlloc + 'static> Projection<DSA> {
             mode: ProjectionMode::FromCamera, // This means `eyeOffset` should be zero, which would
             // be what is returned by `bytemuck::Zeroable`
             ipd: f32::NAN,
-            overlay_width: f32::NAN,
+            overlay_width,
             camera_calib: *camera_calib,
             mvps: [Matrix4::identity(), Matrix4::identity()],
         };
@@ -367,20 +417,21 @@ impl<DSA: DescriptorSetAlloc + 'static> Projection<DSA> {
             },
         )?;
         let desc_sets = [0, 1].try_map(|i| {
-            Ok::<_, anyhow::Error>(PersistentDescriptorSet::new(
+            PersistentDescriptorSet::new(
                 descriptor_set_allocator,
                 layout.clone(),
                 [
                     WriteDescriptorSet::buffer(0, transforms[i].clone()),
                     WriteDescriptorSet::image_view_sampler(
                         1,
-                        ImageView::new(source.clone(), ImageViewCreateInfo::from_image(&source))?,
+                        ImageView::new(source.clone(), ImageViewCreateInfo::from_image(source))?,
                         sampler.clone(),
                     ),
                     WriteDescriptorSet::buffer(2, tex_offsets[i].clone()),
                 ],
                 None,
-            )?)
+            )
+            .map_err(ProjectorError::from)
         })?;
         Ok(Self {
             saved_parameters: init_params,
@@ -389,6 +440,8 @@ impl<DSA: DescriptorSetAlloc + 'static> Projection<DSA> {
             render_pass,
             pipeline,
             source: source.clone(),
+            mode_ipd_changed: true,
+            mvps_changed: true,
         })
     }
     pub fn project(
@@ -398,7 +451,8 @@ impl<DSA: DescriptorSetAlloc + 'static> Projection<DSA> {
         after: impl GpuFuture,
         queue: &Arc<Queue>,
         output: Arc<Image>,
-    ) -> Result<impl GpuFuture> {
+    ) -> Result<impl GpuFuture, ProjectorError> {
+        self.recalculate_uniforms()?;
         let framebuffer = Framebuffer::new(
             self.render_pass.clone(),
             vulkano::render_pass::FramebufferCreateInfo {

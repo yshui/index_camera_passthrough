@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 /// Because your eye and the camera is at different physical locations, it is impossible
 /// to project camera view into VR space perfectly. There are trade offs approximating
 /// this projection. (viewing range means things too close to you will give you double vision).
-#[derive(Eq, PartialEq, Debug, Serialize, Deserialize, Clone, Copy)]
+#[derive(Eq, PartialEq, Debug, Serialize, Deserialize, Clone, Copy, PartialOrd, Ord)]
 pub enum ProjectionMode {
     /// in this mode, we assume your eyes are at the cameras' physical location. this mode
     /// has larger viewing range, but everything will smaller to you.
@@ -21,7 +21,7 @@ impl Default for ProjectionMode {
 pub const fn default_overlay_distance() -> f32 {
     1.0
 }
-#[derive(PartialEq, Debug, Serialize, Deserialize)]
+#[derive(PartialEq, Debug, Serialize, Deserialize, Clone, Copy)]
 #[serde(tag = "mode")]
 pub enum PositionMode {
     /// the overlay is shown right in front of your HMD
@@ -43,7 +43,7 @@ impl Default for PositionMode {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Eq, PartialEq, Clone, Copy)]
+#[derive(Debug, Serialize, Deserialize, Eq, PartialEq, Clone, Copy, PartialOrd, Ord)]
 pub enum Eye {
     Left,
     Right,
@@ -53,9 +53,11 @@ pub const fn default_display_eye() -> Eye {
     Eye::Left
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 #[serde(tag = "mode")]
 pub enum DisplayMode {
+    #[default]
+    Direct,
     /// display a stereo image on the overlay. conceptually the overlay becomes a portal from VR
     /// space to real world. you will be able to see more of the real world if the overlay occupys
     /// more of your field of view.
@@ -72,9 +74,12 @@ pub enum DisplayMode {
     },
 }
 
-impl Default for DisplayMode {
-    fn default() -> Self {
-        Self::Flat { eye: Eye::Left }
+impl DisplayMode {
+    pub(crate) fn projection_mode(&self) -> Option<ProjectionMode> {
+        match self {
+            DisplayMode::Stereo { projection_mode } => Some(*projection_mode),
+            _ => None,
+        }
     }
 }
 
@@ -93,6 +98,16 @@ pub enum Button {
     A,
     B,
 }
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, Default)]
+pub enum Backend {
+    #[default]
+    #[serde(alias = "steamvr", alias = "openvr")]
+    OpenVR,
+    #[serde(alias = "openxr")]
+    OpenXR,
+}
+
 
 impl From<Button> for openvr_sys2::EVRButtonId {
     fn from(b: Button) -> Self {
@@ -136,6 +151,8 @@ pub const fn default_open_delay() -> std::time::Duration {
 /// Index camera passthrough
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
+    /// VR backend to use
+    pub backend: Backend,
     /// camera device to use. auto detect if not set
     #[serde(default)]
     pub camera_device: String,
@@ -163,6 +180,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             camera_device: "".to_owned(),
+            backend: Backend::OpenVR,
             overlay: Default::default(),
             display_mode: Default::default(),
             toggle_button: default_toggle_button(),

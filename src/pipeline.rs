@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use nalgebra::Matrix4;
 use vulkano::{
     buffer::{Buffer, BufferCreateInfo, BufferUsage},
     command_buffer::{
@@ -9,7 +8,7 @@ use vulkano::{
         AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferToImageInfo,
         PrimaryCommandBufferAbstract,
     },
-    descriptor_set::allocator::{StandardDescriptorSetAlloc, StandardDescriptorSetAllocator},
+    descriptor_set::allocator::StandardDescriptorSetAllocator,
     device::{Device, DeviceOwned},
     format::Format,
     image::{Image as VkImage, ImageCreateInfo, ImageUsage},
@@ -20,16 +19,9 @@ use vulkano::{
     Handle, VulkanObject,
 };
 
-pub(crate) struct Image {
-    pub image: VkImage,
-    pub final_layout: Option<vulkano::image::ImageLayout>,
-}
-
 pub(crate) struct Pipeline {
     yuv: Option<crate::yuv::GpuYuyvConverter>,
     correction: Option<crate::distortion_correction::StereoCorrection>,
-    projection: Option<crate::projection::Projection<StandardDescriptorSetAlloc>>,
-    projection_params: Option<crate::projection::ProjectionParameters>,
     capture: bool,
     render_doc: Option<renderdoc::RenderDoc<renderdoc::V100>>,
     cmdbuf_allocator: StandardCommandBufferAllocator,
@@ -45,8 +37,6 @@ impl std::fmt::Debug for Pipeline {
         f.debug_struct("Pipeline")
             .field("yuv", &self.yuv)
             .field("correction", &self.correction)
-            .field("projection", &self.projection)
-            .field("projection_params", &self.projection_params)
             .field("capture", &self.capture)
             .field("render_doc", &self.render_doc)
             .field("yuv_texture", &self.yuv_texture.handle().as_raw())
@@ -83,7 +73,7 @@ pub(crate) fn submit_cpu_image(
         },
         img.len() as u64,
     )?;
-    buffer.write()?.copy_from_slice(&img);
+    buffer.write()?.copy_from_slice(img);
     let mut cmdbuf = AutoCommandBufferBuilder::primary(
         cmdbuf_allocator,
         queue.queue_family_index(),
@@ -292,34 +282,6 @@ impl Pipeline {
                 )
             })
             .transpose()?;
-        let (projector, projection_mode) =
-            if let DisplayMode::Stereo { projection_mode } = display_mode {
-                let texture = if correction.is_some() {
-                    &textures[1]
-                } else {
-                    &textures[0]
-                };
-                (
-                    Some(crate::projection::Projection::new(
-                        device.clone(),
-                        &allocator,
-                        &descriptor_set_allocator,
-                        texture,
-                        &camera_config,
-                    )?),
-                    Some(projection_mode),
-                )
-            } else {
-                (None, None)
-            };
-        let projection_params =
-            projection_mode.map(|mode| crate::projection::ProjectionParameters {
-                ipd,
-                overlay_width: 1.0,
-                mvps: [Matrix4::identity(), Matrix4::identity()],
-                camera_calib: camera_config,
-                mode,
-            });
         let fov = correction
             .as_ref()
             .map(|c| c.fov())
@@ -330,8 +292,6 @@ impl Pipeline {
             log::info!("RenderDoc loaded");
         }
         Ok(Self {
-            projection: projector,
-            projection_params,
             correction,
             yuv: converter,
             capture: false,
@@ -347,6 +307,12 @@ impl Pipeline {
             camera_config,
         })
     }
+    pub fn fov(&self) -> [[f64; 2]; 2] {
+        self.correction
+            .as_ref()
+            .map(|c| c.fov())
+            .unwrap_or([[1.19; 2]; 2])
+    }
     /// Run the pipeline
     ///
     /// # Arguments
@@ -354,9 +320,6 @@ impl Pipeline {
     /// - time: Time offset into the past when the camera frame is captured
     pub(crate) fn run(
         &mut self,
-        eye_to_head: &[Matrix4<f64>; 2],
-        hmd_transform: &Matrix4<f64>,
-        overlay_transform: &Matrix4<f64>,
         queue: &Arc<vulkano::device::Queue>,
         input: &[u8],
         output: Arc<VkImage>,
@@ -370,7 +333,7 @@ impl Pipeline {
 
         // 1. submit image to GPU
         // 2. convert YUYV to RGB
-        let texture = if self.projection.is_some() || self.correction.is_some() {
+        let texture = if self.correction.is_some() {
             &self.textures[0]
         } else {
             &output
@@ -409,11 +372,7 @@ impl Pipeline {
                 &self.memory_allocator,
                 future,
                 queue,
-                if self.projection.is_some() {
-                    self.textures[1].clone()
-                } else {
-                    output.clone()
-                },
+                output.clone(),
             )?;
             future.flush()?;
             future.cleanup_finished();
@@ -422,40 +381,6 @@ impl Pipeline {
             EitherGpuFuture::Right(future)
         };
         // TODO combine correction and projection
-        // 4. projection
-        let future = if let Some(projector) = self.projection.as_mut() {
-            let projection_params = self.projection_params.as_mut().unwrap();
-            let fov = self
-                .correction
-                .as_ref()
-                .map(|c| c.fov())
-                .unwrap_or([[1.19; 2]; 2]);
-            // Finally apply projection
-            // Calculate each eye's Model View Project matrix at the moment the current frame is taken
-            let (l, r) = projector.calculate_mvp(
-                projection_params.mode,
-                &overlay_transform,
-                &self.camera_config,
-                &fov,
-                eye_to_head,
-                hmd_transform,
-            );
-            projection_params.mvps = [l, r];
-            projection_params.ipd = self.ipd;
-            projector.set_params(projection_params)?;
-            let mut future = projector.project(
-                &self.memory_allocator,
-                &self.cmdbuf_allocator,
-                future,
-                queue,
-                output,
-            )?;
-            future.flush()?;
-            future.cleanup_finished();
-            EitherGpuFuture::Left(future)
-        } else {
-            EitherGpuFuture::Right(future)
-        };
 
         if self.capture {
             if let Some(rd) = self.render_doc.as_mut() {

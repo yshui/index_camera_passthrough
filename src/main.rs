@@ -21,23 +21,13 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 
-use nalgebra::{matrix, Matrix4};
-
 use v4l::video::Capture;
 use vulkano::{
-    command_buffer::{
-        allocator::{CommandBufferAllocator, StandardCommandBufferAllocator},
-        sys::{CommandBufferBeginInfo, UnsafeCommandBufferBuilder},
-        CommandBufferLevel, CommandBufferUsage,
-    },
-    device::{self, DeviceCreateInfo, QueueCreateInfo, QueueFlags},
-    image::{Image, ImageCreateInfo, ImageLayout, ImageUsage},
-    instance::{Instance, InstanceCreateInfo, Version},
-    memory::allocator::{
-        AllocationCreateInfo, MemoryAllocator, MemoryTypeFilter, StandardMemoryAllocator,
-    },
-    sync::{AccessFlags, DependencyInfo, GpuFuture, ImageMemoryBarrier, PipelineStages},
-    VulkanLibrary, VulkanObject,
+    command_buffer::allocator::{CommandBufferAllocator, StandardCommandBufferAllocator},
+    image::{Image, ImageAllocateError, ImageCreateInfo, ImageLayout, ImageUsage},
+    memory::allocator::{AllocationCreateInfo, MemoryAllocator, MemoryTypeFilter},
+    sync::GpuFuture,
+    Validated,
 };
 use xdg::BaseDirectories;
 /// Camera image will be (size * 2, size)
@@ -45,7 +35,7 @@ const CAMERA_SIZE: u32 = 960;
 #[allow(unused_imports)]
 use log::info;
 
-use crate::vrapi::Vr;
+use crate::{config::Backend, vrapi::VrExt};
 
 static APP_KEY: &str = "index_camera_passthrough_rs\0";
 static APP_NAME: &str = "Camera\0";
@@ -87,8 +77,10 @@ fn first_run(xdg: &BaseDirectories) -> Result<()> {
     Ok(())
 }
 
-fn create_submittable_image(allocator: &impl MemoryAllocator) -> Result<Arc<Image>> {
-    Ok(Image::new(
+fn create_submittable_image(
+    allocator: &impl MemoryAllocator,
+) -> Result<Arc<Image>, Validated<ImageAllocateError>> {
+    Image::new(
         allocator,
         ImageCreateInfo {
             extent: [CAMERA_SIZE * 2, CAMERA_SIZE, 1],
@@ -104,19 +96,19 @@ fn create_submittable_image(allocator: &impl MemoryAllocator) -> Result<Arc<Imag
             memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
             ..Default::default()
         },
-    )?)
+    )
 }
 
 fn load_splash(
+    output: Arc<Image>,
     cmdbuf_allocator: &(impl CommandBufferAllocator + 'static),
     allocator: &impl MemoryAllocator,
     queue: Arc<vulkano::device::Queue>,
-) -> Result<Arc<Image>> {
+) -> Result<()> {
     log::debug!("loading splash");
     let img = image::load_from_memory_with_format(SPLASH_IMAGE, image::ImageFormat::Png)?
         .into_rgba8()
         .into_raw();
-    let output = create_submittable_image(allocator)?;
     queue
         .device()
         .set_debug_utils_object_name(&output, Some("splash"))?;
@@ -126,7 +118,7 @@ fn load_splash(
     future.then_signal_fence().wait(None)?;
 
     log::debug!("splash loaded");
-    Ok(output)
+    Ok(())
 }
 
 fn main() -> Result<()> {
@@ -168,122 +160,50 @@ fn main() -> Result<()> {
         r.store(false, std::sync::atomic::Ordering::Relaxed);
     })
     .expect("Error setting Ctrl-C handler");
-
-    let library = VulkanLibrary::new()?;
-    // Create vulkan instance, and setup openvr.
-    // Then create a vulkan device based on openvr's requirements
-    let extensions = *library.supported_extensions();
-    let instance = Instance::new(
-        library,
-        InstanceCreateInfo {
-            max_api_version: Some(Version::V1_6),
-            enabled_extensions: extensions,
-            // enabled_layers: vec!["VK_LAYER_KHRONOS_validation".to_owned()],
-            ..Default::default()
-        },
-    )?;
-    let mut vrsys = crate::vrapi::OpenVr::new(&xdg)?;
-    let device = vrsys.create_device(&instance)?;
-    let queue_family = device
-        .queue_family_properties()
-        .iter()
-        .position(|qf| qf.queue_flags.contains(QueueFlags::GRAPHICS))
-        .with_context(|| anyhow!("Cannot create a suitable queue"))?;
-    let (device, mut queues) = {
-        let extensions: device::DeviceExtensions = vrsys.required_extensions(&device);
-        device::Device::new(
-            device,
-            DeviceCreateInfo {
-                enabled_features: device::Features::empty(),
-                enabled_extensions: extensions,
-                queue_create_infos: vec![QueueCreateInfo {
-                    queue_family_index: queue_family as u32,
-                    queues: vec![1.0],
-                    ..Default::default()
-                }],
-                ..Default::default()
-            },
-        )?
+    log::info!("{:?}", cfg.backend);
+    let mut vrsys = match cfg.backend {
+        Backend::OpenVR => crate::vrapi::OpenVr::new(&xdg)?.boxed(),
+        Backend::OpenXR => crate::vrapi::OpenXr::new()?.boxed(),
     };
-    let queue = queues.next().unwrap();
+    let instance = vrsys.vk_instance();
+    let (device, queue) = vrsys.vk_device(&instance);
 
     let cmdbuf_allocator = StandardCommandBufferAllocator::new(
         device.clone(),
         vulkano::command_buffer::allocator::StandardCommandBufferAllocatorCreateInfo::default(),
     );
-    let allocator = StandardMemoryAllocator::new_default(device.clone());
 
-    let splash = load_splash(&cmdbuf_allocator, &allocator, queue.clone())?;
+    load_splash(
+        vrsys.get_render_texture()?,
+        &cmdbuf_allocator,
+        vrsys.vk_allocator(),
+        queue.clone(),
+    )?;
 
     // Create a VROverlay
-    match &cfg.display_mode {
-        config::DisplayMode::Stereo { .. } => {
-            vrsys.set_overlay_stereo(true)?;
-        }
-        &config::DisplayMode::Flat { eye } => {
-            let bound = if eye == crate::config::Eye::Left {
-                crate::vrapi::Bounds {
-                    umin: 0.0,
-                    umax: 0.5,
-                    vmin: 0.0,
-                    vmax: 1.0,
-                }
-            } else {
-                crate::vrapi::Bounds {
-                    umin: 0.5,
-                    umax: 1.0,
-                    vmin: 0.0,
-                    vmax: 1.0,
-                }
-            };
-            vrsys.set_overlay_texture_bounds(bound)?;
-        }
-    }
+    vrsys.set_display_mode(config::DisplayMode::Direct)?;
     // load camera config
     let camera_config = vrsys
         .load_camera_paramter()
-        .or_else(|| steam::find_steam_config()); // if the backend doesn't give us the parameters, we try
-                                                 // to search in the steam config for whatever that looks
-                                                 // like a camera parameter file
+        .or_else(steam::find_steam_config); // if the backend doesn't give us the parameters, we try
+                                            // to search in the steam config for whatever that looks
+                                            // like a camera parameter file
 
-    let hmd_transform = vrsys.hmd_transform(0.0);
-    let mut overlay_transform: Matrix4<f64> = match cfg.overlay.position {
-        config::PositionMode::Absolute { transform } => {
-            let mut transformation = openvr_sys2::HmdMatrix34_t { m: [[0.0; 4]; 3] };
-            transformation.m[..].copy_from_slice(&transform[..3]);
-            vrsys.set_overlay_transformation(transformation.into())?;
-            let transform: Matrix4<f32> = transform.into();
-            transform.cast()
-        }
-        config::PositionMode::Hmd { distance } => {
-            hmd_transform
-                * matrix![
-                    1.0, 0.0, 0.0, 0.0;
-                    0.0, 1.0, 0.0, 0.0;
-                    0.0, 0.0, 1.0, -distance as f64;
-                    0.0, 0.0, 0.0, 1.0;
-                ]
-        }
-    };
-
-    // Set initial position for overlay
-    vrsys.set_overlay_transformation(overlay_transform)?;
+    vrsys.set_position_mode(cfg.overlay.position)?;
 
     // Show splash screen
     log::debug!("showing splash");
-    vrsys.set_overlay_texture(
-        CAMERA_SIZE * 2,
-        CAMERA_SIZE,
-        splash,
+    vrsys.submit_texture(
         vulkano::image::ImageLayout::ColorAttachmentOptimal,
-        device.clone(),
-        queue.clone(),
-        instance.clone(),
+        std::time::Duration::ZERO,
+        &[[0., 0.], [0., 0.]],
     )?;
 
     // Show overlay
     log::debug!("showing overlay");
     vrsys.show_overlay()?;
+
+    vrsys.set_display_mode(cfg.display_mode)?;
 
     // TODO: don't hardcode this
     struct AppConfig {
@@ -329,46 +249,18 @@ fn main() -> Result<()> {
                 elapsed = std::time::Duration::ZERO;
             }
             // Allocate final image
-            let output = create_submittable_image(&allocator)?;
+            let output = vrsys.get_render_texture()?;
 
-            let hmd_transform = vrsys.hmd_transform(-elapsed.as_secs_f32());
-            match cfg.overlay.position {
-                config::PositionMode::Absolute { .. } => (),
-                config::PositionMode::Hmd { distance } => {
-                    // We only move the overlay when we get new camera frame
-                    // this way the overlay should be reprojected correctly in-between
-                    overlay_transform = hmd_transform
-                        * matrix![
-                            1.0, 0.0, 0.0, 0.0;
-                            0.0, 1.0, 0.0, 0.0;
-                            0.0, 0.0, 1.0, -distance as f64;
-                            0.0, 0.0, 0.0, 1.0;
-                        ];
-                    vrsys.set_overlay_transformation(overlay_transform)?;
-                }
-            };
-
-            let future = pipeline.run(
-                &vrsys.eye_to_head(),
-                &hmd_transform,
-                &overlay_transform,
-                &queue,
-                frame,
-                output.clone(),
-            )?;
+            let future = pipeline.run(&queue, frame, output.clone())?;
             //println!("submission: {:?}", submission);
             future.flush()?; // can't use then_signal_fence_and_flush() because of a vulkano bug
             future.then_signal_fence().wait(None)?;
 
             // Submit the texture
-            vrsys.set_overlay_texture(
-                CAMERA_SIZE * 2,
-                CAMERA_SIZE,
-                output,
+            vrsys.submit_texture(
                 ImageLayout::ColorAttachmentOptimal,
-                device.clone(),
-                queue.clone(),
-                instance.clone(),
+                elapsed,
+                &pipeline.fov(),
             )?;
         }
 
@@ -405,7 +297,7 @@ fn main() -> Result<()> {
         } else {
             debug_pressed = false;
         }
-        state.handle(&vrsys)?;
+        state.handle(&*vrsys)?;
         match state.turn() {
             events::Action::ShowOverlay => vrsys.show_overlay()?,
             events::Action::HideOverlay => vrsys.hide_overlay()?,
