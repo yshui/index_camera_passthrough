@@ -14,7 +14,7 @@ use vulkano::{
         sys::{CommandBufferBeginInfo, UnsafeCommandBufferBuilder},
         CommandBufferLevel, CommandBufferUsage,
     },
-    descriptor_set::allocator::{StandardDescriptorSetAlloc, StandardDescriptorSetAllocator},
+    descriptor_set::{allocator::{StandardDescriptorSetAlloc, StandardDescriptorSetAllocator}, self},
     device::{physical::PhysicalDevice, Device, Queue, QueueCreateInfo, QueueFlags},
     image::{ImageAspects, ImageLayout, ImageSubresourceRange},
     instance::Instance,
@@ -106,7 +106,6 @@ pub(crate) trait VkContext {
 
 pub(crate) trait Vr: VkContext {
     type Error: Send + Sync + 'static;
-    fn hmd_transform(&self, time_offset: f32) -> nalgebra::Matrix4<f64>;
     fn load_camera_paramter(&mut self) -> Option<StereoCamera>;
     fn ipd(&self) -> Result<f32, Self::Error>;
     fn eye_to_head(&self) -> [Matrix4<f64>; 2];
@@ -161,9 +160,6 @@ impl<T: Vr, E: Send + Sync + 'static, F: Fn(<T as Vr>::Error) -> E> Vr for VrMap
     type Error = E;
     fn acknowledge_quit(&mut self) {
         self.0.acknowledge_quit()
-    }
-    fn hmd_transform(&self, time_offset: f32) -> nalgebra::Matrix4<f64> {
-        self.0.hmd_transform(time_offset)
     }
     fn load_camera_paramter(&mut self) -> Option<StereoCamera> {
         self.0.load_camera_paramter()
@@ -555,9 +551,6 @@ fn transition_layout(
 
 impl Vr for OpenVr {
     type Error = OpenVrError;
-    fn hmd_transform(&self, time_offset: f32) -> nalgebra::Matrix4<f64> {
-        self.sys.hmd_transform(time_offset)
-    }
     fn load_camera_paramter(&mut self) -> Option<StereoCamera> {
         if let Some(cfg) = self.camera_config.as_ref() {
             Some(*cfg)
@@ -603,7 +596,7 @@ impl Vr for OpenVr {
         elapsed: Duration,
         fov: &[[f64; 2]; 2],
     ) -> Result<(), Self::Error> {
-        let hmd_transform = self.hmd_transform(-elapsed.as_secs_f32());
+        let hmd_transform = self.sys.hmd_transform(-elapsed.as_secs_f32());
         if let PositionMode::Hmd { distance } = self.position_mode {
             let overlay_transform = hmd_transform
                 * matrix![
@@ -854,6 +847,9 @@ pub(crate) struct OpenXr {
     overlay_transform: Matrix4<f64>,
     position_mode: PositionMode,
     display_mode: DisplayMode,
+    allocator: StandardMemoryAllocator,
+    descriptor_set_allocator: StandardDescriptorSetAllocator,
+    cmdbuf_allocator: StandardCommandBufferAllocator,
 
     device: Arc<Device>,
     queue: Arc<Queue>,
@@ -984,6 +980,10 @@ impl OpenXr {
         let system = instance.system(openxr::FormFactor::HEAD_MOUNTED_DISPLAY)?;
         let vk_instance = Self::create_vk_instance(&instance, system)?;
         let (device, queue) = Self::create_vk_device(&instance, system, &vk_instance)?;
+        let allocator = StandardMemoryAllocator::new_default(device.clone());
+        let cmdbuf_allocator =
+            StandardCommandBufferAllocator::new(device.clone(), Default::default());
+        let descriptor_set_allocator = StandardDescriptorSetAllocator::new(device.clone());
         Ok(Self {
             entry,
             instance,
@@ -993,6 +993,9 @@ impl OpenXr {
             position_mode: PositionMode::default(),
             display_mode: DisplayMode::default(),
 
+            allocator,
+            descriptor_set_allocator,
+            cmdbuf_allocator,
             vk_instance,
             device,
             queue,
@@ -1010,20 +1013,20 @@ unsafe extern "system" fn get_instance_proc_addr(
 }
 
 impl VkContext for OpenXr {
-    fn vk_device(&self, instance: &Arc<Instance>) -> (Arc<Device>, Arc<Queue>) {
+    fn vk_device(&self, _instance: &Arc<Instance>) -> (Arc<Device>, Arc<Queue>) {
         (self.device.clone(), self.queue.clone())
     }
     fn vk_instance(&self) -> Arc<Instance> {
         self.vk_instance.clone()
     }
     fn vk_allocator(&self) -> &StandardMemoryAllocator {
-        todo!()
+        &self.allocator
     }
     fn vk_descriptor_set_allocator(&self) -> &StandardDescriptorSetAllocator {
-        todo!()
+        &self.descriptor_set_allocator
     }
     fn vk_command_buffer_allocator(&self) -> &StandardCommandBufferAllocator {
-        todo!()
+        &self.cmdbuf_allocator
     }
 }
 
@@ -1033,10 +1036,6 @@ impl Vr for OpenXr {
     }
 
     type Error = OpenXrError;
-
-    fn hmd_transform(&self, time_offset: f32) -> nalgebra::Matrix4<f64> {
-        todo!()
-    }
 
     fn load_camera_paramter(&mut self) -> Option<StereoCamera> {
         None
