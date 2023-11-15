@@ -12,9 +12,7 @@ use vulkano::{
     device::{Device, DeviceOwned},
     format::Format,
     image::{Image as VkImage, ImageCreateInfo, ImageUsage},
-    memory::allocator::{
-        AllocationCreateInfo, MemoryAllocator, MemoryTypeFilter, StandardMemoryAllocator,
-    },
+    memory::allocator::{AllocationCreateInfo, MemoryAllocator, MemoryTypeFilter},
     sync::GpuFuture,
     Handle, VulkanObject,
 };
@@ -24,8 +22,6 @@ pub(crate) struct Pipeline {
     correction: Option<crate::distortion_correction::StereoCorrection>,
     capture: bool,
     render_doc: Option<renderdoc::RenderDoc<renderdoc::V100>>,
-    cmdbuf_allocator: StandardCommandBufferAllocator,
-    memory_allocator: StandardMemoryAllocator,
     yuv_texture: Arc<VkImage>,
     textures: [Arc<VkImage>; 2],
     ipd: f32,
@@ -55,7 +51,7 @@ use crate::{config::DisplayMode, CAMERA_SIZE};
 pub(crate) fn submit_cpu_image(
     img: &[u8],
     cmdbuf_allocator: &(impl CommandBufferAllocator + 'static),
-    allocator: &impl MemoryAllocator,
+    allocator: Arc<dyn MemoryAllocator>,
     queue: &Arc<vulkano::device::Queue>,
     output: Arc<VkImage>,
 ) -> Result<impl GpuFuture> {
@@ -211,17 +207,17 @@ impl Pipeline {
     /// textures[1] -> projection -> Final output
     pub(crate) fn new(
         device: Arc<Device>,
+        allocator: Arc<dyn MemoryAllocator>,
+        descriptor_set_allocator: &StandardDescriptorSetAllocator,
         source_is_yuv: bool,
         display_mode: DisplayMode,
         ipd: f32,
         camera_config: Option<crate::vrapi::StereoCamera>,
     ) -> Result<Self> {
         log::info!("IPD: {}", ipd);
-        let descriptor_set_allocator = StandardDescriptorSetAllocator::new(device.clone());
-        let allocator = StandardMemoryAllocator::new_default(device.clone());
         // Allocate intermediate textures
         let yuv_texture = VkImage::new(
-            &allocator,
+            allocator.clone(),
             ImageCreateInfo {
                 extent: [CAMERA_SIZE, CAMERA_SIZE, 1],
                 format: Format::R8G8B8A8_UNORM,
@@ -240,7 +236,7 @@ impl Pipeline {
         device.set_debug_utils_object_name(&yuv_texture, Some("yuv_texture"))?;
         let textures = [0, 1].try_map(|id| {
             let tex = VkImage::new(
-                &allocator,
+                allocator.clone(),
                 ImageCreateInfo {
                     extent: [CAMERA_SIZE * 2, CAMERA_SIZE, 1],
                     format: Format::R8G8B8A8_UNORM,
@@ -261,7 +257,7 @@ impl Pipeline {
             .then(|| {
                 crate::yuv::GpuYuyvConverter::new(
                     device.clone(),
-                    &descriptor_set_allocator,
+                    descriptor_set_allocator,
                     CAMERA_SIZE * 2,
                     CAMERA_SIZE,
                     &yuv_texture,
@@ -274,8 +270,8 @@ impl Pipeline {
             .map(|cfg| {
                 crate::distortion_correction::StereoCorrection::new(
                     device.clone(),
-                    &allocator,
-                    &descriptor_set_allocator,
+                    allocator,
+                    descriptor_set_allocator,
                     textures[0].clone(),
                     &cfg,
                     matches!(display_mode, DisplayMode::Flat { .. }),
@@ -296,11 +292,6 @@ impl Pipeline {
             yuv: converter,
             capture: false,
             render_doc,
-            cmdbuf_allocator: StandardCommandBufferAllocator::new(
-                device.clone(),
-                Default::default(),
-            ),
-            memory_allocator: allocator,
             textures,
             yuv_texture,
             ipd,
@@ -321,6 +312,8 @@ impl Pipeline {
     pub(crate) fn run(
         &mut self,
         queue: &Arc<vulkano::device::Queue>,
+        allocator: Arc<dyn MemoryAllocator>,
+        cmdbuf_allocator: &StandardCommandBufferAllocator,
         input: &[u8],
         output: Arc<VkImage>,
     ) -> Result<impl GpuFuture> {
@@ -341,14 +334,14 @@ impl Pipeline {
         let future = if let Some(converter) = &self.yuv {
             let future = submit_cpu_image(
                 input,
-                &self.cmdbuf_allocator,
-                &self.memory_allocator,
+                cmdbuf_allocator,
+                allocator.clone(),
                 queue,
                 self.yuv_texture.clone(),
             )?;
             let future = converter.yuyv_buffer_to_vulkan_image(
-                &self.memory_allocator,
-                &self.cmdbuf_allocator,
+                allocator.clone(),
+                cmdbuf_allocator,
                 future,
                 queue,
                 texture.clone(),
@@ -357,8 +350,8 @@ impl Pipeline {
         } else {
             let future = submit_cpu_image(
                 input,
-                &self.cmdbuf_allocator,
-                &self.memory_allocator,
+                cmdbuf_allocator,
+                allocator.clone(),
                 queue,
                 texture.clone(),
             )?;
@@ -368,8 +361,8 @@ impl Pipeline {
         // 3. lens correction
         let future = if let Some(correction) = &self.correction {
             let mut future = correction.correct(
-                &self.cmdbuf_allocator,
-                &self.memory_allocator,
+                cmdbuf_allocator,
+                allocator.clone(),
                 future,
                 queue,
                 output.clone(),

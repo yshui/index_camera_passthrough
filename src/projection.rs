@@ -13,7 +13,7 @@ use anyhow::Result;
 use std::sync::Arc;
 use vulkano::{
     buffer::{
-        Buffer, BufferAllocateError, BufferContents, BufferCreateInfo, BufferUsage, Subbuffer,
+        AllocateBufferError, Buffer, BufferContents, BufferCreateInfo, BufferUsage, Subbuffer,
     },
     command_buffer::{
         allocator::StandardCommandBufferAllocator, AutoCommandBufferBuilder,
@@ -31,7 +31,7 @@ use vulkano::{
         Image, ImageLayout,
     },
     memory::allocator::{
-        AllocationCreateInfo, MemoryAllocatePreference, MemoryTypeFilter, StandardMemoryAllocator,
+        AllocationCreateInfo, MemoryAllocatePreference, MemoryAllocator, MemoryTypeFilter,
     },
     pipeline::{
         graphics::{
@@ -44,7 +44,7 @@ use vulkano::{
             GraphicsPipelineCreateInfo,
         },
         layout::{IntoPipelineLayoutCreateInfoError, PipelineDescriptorSetLayoutCreateInfo},
-        GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineLayout,
+        DynamicState, GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineLayout,
         PipelineShaderStageCreateInfo,
     },
     render_pass::{Framebuffer, RenderPass, Subpass},
@@ -151,7 +151,7 @@ pub enum ProjectorError {
     #[error("{0}")]
     CreateInfo(#[from] IntoPipelineLayoutCreateInfoError),
     #[error("buffer allocation error: {0}")]
-    BufferAlloc(#[from] Validated<BufferAllocateError>),
+    BufferAlloc(#[from] Validated<AllocateBufferError>),
     #[error("host access error: {0}")]
     HostAccess(#[from] HostAccessError),
     #[error("command buffer execution error: {0}")]
@@ -300,9 +300,9 @@ impl<DSA: DescriptorSetAlloc + 'static> Projection<DSA> {
         Ok(())
     }
     fn make_uniform_buffer<T: BufferContents>(
-        allocator: &impl vulkano::memory::allocator::MemoryAllocator,
+        allocator: Arc<dyn MemoryAllocator>,
         uniform: T,
-    ) -> Result<Subbuffer<T>, Validated<BufferAllocateError>> {
+    ) -> Result<Subbuffer<T>, Validated<AllocateBufferError>> {
         log::debug!("uniform buffer size {}", std::mem::size_of::<T>());
         Buffer::from_data(
             allocator,
@@ -321,7 +321,7 @@ impl<DSA: DescriptorSetAlloc + 'static> Projection<DSA> {
     }
     pub fn new<DSA2: DescriptorSetAllocator<Alloc = DSA>>(
         device: Arc<Device>,
-        allocator: &impl vulkano::memory::allocator::MemoryAllocator,
+        allocator: Arc<dyn MemoryAllocator>,
         descriptor_set_allocator: &DSA2,
         source: &Arc<Image>,
         overlay_width: f32,
@@ -357,7 +357,7 @@ impl<DSA: DescriptorSetAlloc + 'static> Projection<DSA> {
                 texOffset: [0.5, 0.0],
             },
         ]
-        .try_map(|u| Self::make_uniform_buffer(allocator, u))?;
+        .try_map(|u| Self::make_uniform_buffer(allocator.clone(), u))?;
         let vs = vs.entry_point("main").unwrap();
         let fs = fs.entry_point("main").unwrap();
         let stages = [
@@ -369,8 +369,8 @@ impl<DSA: DescriptorSetAlloc + 'static> Projection<DSA> {
             PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages)
                 .into_pipeline_layout_create_info(device.clone())?,
         )?;
-        let transforms =
-            [vs::Transform::default(); 2].try_map(|u| Self::make_uniform_buffer(allocator, u))?;
+        let transforms = [vs::Transform::default(); 2]
+            .try_map(|u| Self::make_uniform_buffer(allocator.clone(), u))?;
         {
             let mut transform_writes = [transforms[0].write()?, transforms[1].write()?];
             transform_writes[0].overlayWidth = overlay_width.into();
@@ -387,14 +387,19 @@ impl<DSA: DescriptorSetAlloc + 'static> Projection<DSA> {
                         .map_err(Validated::<VulkanError>::from)?,
                 ),
                 stages: stages.into_iter().collect(),
-                input_assembly_state: Some(
-                    InputAssemblyState::new().topology(PrimitiveTopology::TriangleStrip),
-                ),
-                viewport_state: Some(ViewportState::viewport_dynamic_scissor_irrelevant()),
+                input_assembly_state: Some(InputAssemblyState {
+                    topology: PrimitiveTopology::TriangleStrip,
+                    ..Default::default()
+                }),
+                viewport_state: Some(ViewportState::default()),
+                dynamic_state: [DynamicState::Viewport].into_iter().collect(),
                 subpass: Some(Subpass::from(render_pass.clone(), 0).unwrap().into()),
-                rasterization_state: Some(RasterizationState::new()),
-                multisample_state: Some(MultisampleState::new()),
-                color_blend_state: Some(ColorBlendState::new(1)),
+                rasterization_state: Some(RasterizationState::default()),
+                multisample_state: Some(MultisampleState::default()),
+                color_blend_state: Some(ColorBlendState::with_attachment_states(
+                    1,
+                    Default::default(),
+                )),
                 ..GraphicsPipelineCreateInfo::layout(layout)
             },
         )?;
@@ -446,7 +451,7 @@ impl<DSA: DescriptorSetAlloc + 'static> Projection<DSA> {
     }
     pub fn project(
         &mut self,
-        allocator: &StandardMemoryAllocator,
+        allocator: Arc<dyn MemoryAllocator>,
         cmdbuf_allocator: &StandardCommandBufferAllocator,
         after: impl GpuFuture,
         queue: &Arc<Queue>,

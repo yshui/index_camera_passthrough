@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use smallvec::smallvec;
 use std::sync::Arc;
 use vulkano::{
     buffer::{Buffer, BufferCreateInfo, BufferUsage},
@@ -16,14 +17,17 @@ use vulkano::{
     image::view::{ImageView, ImageViewCreateInfo},
     image::Image,
     memory::allocator::{
-        AllocationCreateInfo, MemoryAllocatePreference, MemoryTypeFilter, StandardMemoryAllocator,
+        AllocationCreateInfo, MemoryAllocatePreference, MemoryAllocator, MemoryTypeFilter,
     },
     pipeline::{
         graphics::{
+            color_blend::ColorBlendState,
             input_assembly::{InputAssemblyState, PrimitiveTopology},
+            multisample::MultisampleState,
+            rasterization::RasterizationState,
             vertex_input::{Vertex as VertexTrait, VertexDefinition},
             viewport::{Viewport, ViewportState},
-            GraphicsPipelineCreateInfo, rasterization::RasterizationState, multisample::MultisampleState, color_blend::ColorBlendState,
+            GraphicsPipelineCreateInfo,
         },
         layout::PipelineDescriptorSetLayoutCreateInfo,
         GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineLayout,
@@ -134,20 +138,25 @@ impl GpuYuyvConverter {
                     Vertex::per_vertex().definition(&vs.info().input_interface)?,
                 ),
                 stages: stages.into_iter().collect(),
-                input_assembly_state: Some(
-                    InputAssemblyState::new().topology(PrimitiveTopology::TriangleStrip),
-                ),
-                viewport_state: Some(ViewportState::viewport_fixed_scissor_irrelevant([
-                    Viewport {
+                input_assembly_state: Some(InputAssemblyState {
+                    topology: PrimitiveTopology::TriangleStrip,
+                    ..Default::default()
+                }),
+                viewport_state: Some(ViewportState {
+                    viewports: smallvec![Viewport {
                         offset: [0.0, 0.0],
                         extent: [w as f32, h as f32],
                         depth_range: 0.0..=1.0,
-                    },
-                ])),
+                    }],
+                    ..Default::default()
+                }),
                 subpass: Some(Subpass::from(render_pass.clone(), 0).unwrap().into()),
-                rasterization_state: Some(RasterizationState::new()),
-                multisample_state: Some(MultisampleState::new()),
-                color_blend_state: Some(ColorBlendState::new(1)),
+                rasterization_state: Some(RasterizationState::default()),
+                multisample_state: Some(MultisampleState::default()),
+                color_blend_state: Some(ColorBlendState::with_attachment_states(
+                    1,
+                    Default::default(),
+                )),
                 ..GraphicsPipelineCreateInfo::layout(layout)
             },
         )?;
@@ -185,7 +194,7 @@ impl GpuYuyvConverter {
     /// function again.
     pub fn yuyv_buffer_to_vulkan_image(
         &self,
-        allocator: &StandardMemoryAllocator,
+        allocator: Arc<dyn MemoryAllocator>,
         cmdbuf_allocator: &StandardCommandBufferAllocator,
         after: impl GpuFuture,
         queue: &Arc<Queue>,

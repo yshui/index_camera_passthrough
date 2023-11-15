@@ -24,7 +24,7 @@ use anyhow::{anyhow, Context, Result};
 use v4l::video::Capture;
 use vulkano::{
     command_buffer::allocator::{CommandBufferAllocator, StandardCommandBufferAllocator},
-    image::{Image, ImageAllocateError, ImageCreateInfo, ImageLayout, ImageUsage},
+    image::{AllocateImageError, Image, ImageCreateInfo, ImageLayout, ImageUsage},
     memory::allocator::{AllocationCreateInfo, MemoryAllocator, MemoryTypeFilter},
     sync::GpuFuture,
     Validated,
@@ -78,8 +78,8 @@ fn first_run(xdg: &BaseDirectories) -> Result<()> {
 }
 
 fn create_submittable_image(
-    allocator: &impl MemoryAllocator,
-) -> Result<Arc<Image>, Validated<ImageAllocateError>> {
+    allocator: Arc<dyn MemoryAllocator>,
+) -> Result<Arc<Image>, Validated<AllocateImageError>> {
     Image::new(
         allocator,
         ImageCreateInfo {
@@ -102,7 +102,7 @@ fn create_submittable_image(
 fn load_splash(
     output: Arc<Image>,
     cmdbuf_allocator: &(impl CommandBufferAllocator + 'static),
-    allocator: &impl MemoryAllocator,
+    allocator: Arc<dyn MemoryAllocator>,
     queue: Arc<vulkano::device::Queue>,
 ) -> Result<()> {
     log::debug!("loading splash");
@@ -215,6 +215,8 @@ fn main() -> Result<()> {
 
     let mut pipeline = pipeline::Pipeline::new(
         device.clone(),
+        vrsys.vk_allocator(),
+        vrsys.vk_descriptor_set_allocator(),
         config.need_yuv_conversion,
         cfg.display_mode,
         vrsys.ipd()?,
@@ -251,7 +253,13 @@ fn main() -> Result<()> {
             // Allocate final image
             let output = vrsys.get_render_texture()?;
 
-            let future = pipeline.run(&queue, frame, output.clone())?;
+            let future = pipeline.run(
+                &queue,
+                vrsys.vk_allocator(),
+                vrsys.vk_command_buffer_allocator(),
+                frame,
+                output.clone(),
+            )?;
             //println!("submission: {:?}", submission);
             future.flush()?; // can't use then_signal_fence_and_flush() because of a vulkano bug
             future.then_signal_fence().wait(None)?;

@@ -14,11 +14,14 @@ use vulkano::{
         sys::{CommandBufferBeginInfo, UnsafeCommandBufferBuilder},
         CommandBufferLevel, CommandBufferUsage,
     },
-    descriptor_set::{allocator::{StandardDescriptorSetAlloc, StandardDescriptorSetAllocator}, self},
+    descriptor_set::allocator::{
+        StandardDescriptorSetAlloc, StandardDescriptorSetAllocator,
+        StandardDescriptorSetAllocatorCreateInfo,
+    },
     device::{physical::PhysicalDevice, Device, Queue, QueueCreateInfo, QueueFlags},
     image::{ImageAspects, ImageLayout, ImageSubresourceRange},
     instance::Instance,
-    memory::allocator::StandardMemoryAllocator,
+    memory::allocator::{MemoryAllocator, StandardMemoryAllocator},
     sync::{AccessFlags, DependencyInfo, GpuFuture, ImageMemoryBarrier, PipelineStages},
     Handle, VulkanObject,
 };
@@ -99,7 +102,7 @@ pub enum Action {
 pub(crate) trait VkContext {
     fn vk_device(&self, instance: &Arc<Instance>) -> (Arc<Device>, Arc<Queue>);
     fn vk_instance(&self) -> Arc<Instance>;
-    fn vk_allocator(&self) -> &StandardMemoryAllocator;
+    fn vk_allocator(&self) -> Arc<dyn MemoryAllocator>;
     fn vk_descriptor_set_allocator(&self) -> &StandardDescriptorSetAllocator;
     fn vk_command_buffer_allocator(&self) -> &StandardCommandBufferAllocator;
 }
@@ -139,7 +142,7 @@ pub(crate) trait Vr: VkContext {
 struct VrMapError<T, F>(T, F);
 
 impl<T: VkContext, F> VkContext for VrMapError<T, F> {
-    fn vk_allocator(&self) -> &StandardMemoryAllocator {
+    fn vk_allocator(&self) -> Arc<dyn MemoryAllocator> {
         self.0.vk_allocator()
     }
     fn vk_descriptor_set_allocator(&self) -> &StandardDescriptorSetAllocator {
@@ -237,7 +240,7 @@ pub(crate) struct OpenVr {
     device: Arc<Device>,
     queue: Arc<Queue>,
     instance: Arc<Instance>,
-    allocator: StandardMemoryAllocator,
+    allocator: Arc<StandardMemoryAllocator>,
     cmdbuf_allocator: StandardCommandBufferAllocator,
     descriptor_set_allocator: StandardDescriptorSetAllocator,
     render_texture: Option<Arc<vulkano::image::Image>>,
@@ -359,8 +362,11 @@ impl OpenVr {
         log::debug!("action_set: {:?}", action_set);
         let instance = Self::create_vk_instance()?;
         let (device, queue) = Self::create_vk_device(&sys, &instance)?;
-        let allocator = StandardMemoryAllocator::new_default(device.clone());
-        let descriptor_set_allocator = StandardDescriptorSetAllocator::new(device.clone());
+        let allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
+        let descriptor_set_allocator = StandardDescriptorSetAllocator::new(
+            device.clone(),
+            StandardDescriptorSetAllocatorCreateInfo::default(),
+        );
         let cmdbuf_allocator =
             StandardCommandBufferAllocator::new(device.clone(), Default::default());
         Ok(Self {
@@ -444,7 +450,7 @@ pub(crate) enum OpenVrError {
     #[error("vulkan error: {0}")]
     VulkanValidated(#[from] vulkano::Validated<vulkano::VulkanError>),
     #[error("vulkan allocation error: {0}")]
-    VulkanImageAllocation(#[from] vulkano::Validated<vulkano::image::ImageAllocateError>),
+    VulkanImageAllocation(#[from] vulkano::Validated<vulkano::image::AllocateImageError>),
     #[error("vulkan error: {0}")]
     RawVulkan(#[from] ash::vk::Result),
     #[error("vulkan loading error: {0}")]
@@ -479,8 +485,8 @@ impl VkContext for OpenVr {
         self.instance.clone()
     }
 
-    fn vk_allocator(&self) -> &StandardMemoryAllocator {
-        &self.allocator
+    fn vk_allocator(&self) -> Arc<dyn MemoryAllocator> {
+        self.allocator.clone()
     }
     fn vk_descriptor_set_allocator(&self) -> &StandardDescriptorSetAllocator {
         &self.descriptor_set_allocator
@@ -586,7 +592,7 @@ impl Vr for OpenVr {
     fn get_render_texture(&mut self) -> Result<Arc<vulkano::image::Image>, Self::Error> {
         if self.display_mode.projection_mode().is_none() {
             assert!(self.render_texture.is_none());
-            self.render_texture = Some(crate::create_submittable_image(&self.allocator)?);
+            self.render_texture = Some(crate::create_submittable_image(self.allocator.clone())?);
         }
         Ok(self.render_texture.clone().unwrap())
     }
@@ -608,14 +614,14 @@ impl Vr for OpenVr {
             self.set_overlay_transformation(overlay_transform)?;
         }
         let output = if self.display_mode.projection_mode().is_some() {
-            let new_texture = crate::create_submittable_image(&self.allocator)?;
+            let new_texture = crate::create_submittable_image(self.allocator.clone())?;
             let eye_to_head = self.eye_to_head();
             let ipd = self.ipd()?;
             let projector = self.projector.as_mut().unwrap();
             projector.update_mvps(&self.overlay_transform, fov, &eye_to_head, &hmd_transform)?;
             projector.set_ipd(ipd);
             let future = projector.project(
-                &self.allocator,
+                self.allocator.clone(),
                 &self.cmdbuf_allocator,
                 vulkano::sync::future::now(self.device.clone()),
                 &self.queue,
@@ -677,10 +683,11 @@ impl Vr for OpenVr {
         if let Some(projection_mode) = is_stereo {
             let camera_calib = self.load_camera_paramter();
             if self.projector.is_none() {
-                self.render_texture = Some(crate::create_submittable_image(&self.allocator)?);
+                self.render_texture =
+                    Some(crate::create_submittable_image(self.allocator.clone())?);
                 let mut projector = crate::projection::Projection::new(
                     self.device.clone(),
-                    &self.allocator,
+                    self.allocator.clone(),
                     &self.descriptor_set_allocator,
                     self.render_texture.as_ref().unwrap(),
                     1.0,
@@ -847,7 +854,7 @@ pub(crate) struct OpenXr {
     overlay_transform: Matrix4<f64>,
     position_mode: PositionMode,
     display_mode: DisplayMode,
-    allocator: StandardMemoryAllocator,
+    allocator: Arc<StandardMemoryAllocator>,
     descriptor_set_allocator: StandardDescriptorSetAllocator,
     cmdbuf_allocator: StandardCommandBufferAllocator,
 
@@ -980,10 +987,13 @@ impl OpenXr {
         let system = instance.system(openxr::FormFactor::HEAD_MOUNTED_DISPLAY)?;
         let vk_instance = Self::create_vk_instance(&instance, system)?;
         let (device, queue) = Self::create_vk_device(&instance, system, &vk_instance)?;
-        let allocator = StandardMemoryAllocator::new_default(device.clone());
+        let allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
         let cmdbuf_allocator =
             StandardCommandBufferAllocator::new(device.clone(), Default::default());
-        let descriptor_set_allocator = StandardDescriptorSetAllocator::new(device.clone());
+        let descriptor_set_allocator = StandardDescriptorSetAllocator::new(
+            device.clone(),
+            StandardDescriptorSetAllocatorCreateInfo::default(),
+        );
         Ok(Self {
             entry,
             instance,
@@ -1019,8 +1029,8 @@ impl VkContext for OpenXr {
     fn vk_instance(&self) -> Arc<Instance> {
         self.vk_instance.clone()
     }
-    fn vk_allocator(&self) -> &StandardMemoryAllocator {
-        &self.allocator
+    fn vk_allocator(&self) -> Arc<dyn MemoryAllocator> {
+        self.allocator.clone()
     }
     fn vk_descriptor_set_allocator(&self) -> &StandardDescriptorSetAllocator {
         &self.descriptor_set_allocator

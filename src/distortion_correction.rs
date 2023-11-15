@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
 use log::{info, trace};
+use smallvec::smallvec;
 use std::sync::Arc;
 use vulkano::{
     buffer::{Buffer, BufferCreateInfo, BufferUsage},
@@ -18,16 +19,19 @@ use vulkano::{
         Image, ImageLayout,
     },
     memory::allocator::{
-        AllocationCreateInfo, MemoryAllocatePreference, MemoryTypeFilter, StandardMemoryAllocator,
+        AllocationCreateInfo, MemoryAllocatePreference, MemoryAllocator, MemoryTypeFilter,
     },
     pipeline::{graphics::viewport::Viewport, PipelineBindPoint},
     pipeline::{
         graphics::{
+            color_blend::ColorBlendState,
             input_assembly::{InputAssemblyState, PrimitiveTopology},
+            multisample::MultisampleState,
+            rasterization::RasterizationState,
             subpass::PipelineSubpassType,
             vertex_input::{Vertex as VertexTrait, VertexDefinition},
             viewport::ViewportState,
-            GraphicsPipelineCreateInfo, rasterization::RasterizationState, multisample::MultisampleState, color_blend::ColorBlendState,
+            GraphicsPipelineCreateInfo,
         },
         layout::PipelineDescriptorSetLayoutCreateInfo,
         GraphicsPipeline, Pipeline, PipelineLayout, PipelineShaderStageCreateInfo,
@@ -144,7 +148,7 @@ impl StereoCorrection {
     ///             the vr compositor.
     pub fn new(
         device: Arc<Device>,
-        allocator: &StandardMemoryAllocator,
+        allocator: Arc<dyn MemoryAllocator>,
         descriptor_set_allocator: &StandardDescriptorSetAllocator,
         input: Arc<Image>,
         camera_calib: &crate::vrapi::StereoCamera,
@@ -230,22 +234,27 @@ impl StereoCorrection {
                     vertex_input_state: Some(
                         Vertex::per_vertex().definition(&vs.info().input_interface)?,
                     ),
-                    input_assembly_state: Some(
-                        InputAssemblyState::new().topology(PrimitiveTopology::TriangleStrip),
-                    ),
-                    viewport_state: Some(ViewportState::viewport_fixed_scissor_irrelevant([
-                        Viewport {
+                    input_assembly_state: Some(InputAssemblyState {
+                        topology: PrimitiveTopology::TriangleStrip,
+                        ..Default::default()
+                    }),
+                    viewport_state: Some(ViewportState {
+                        viewports: smallvec![Viewport {
                             offset: [size as f32 * id as f32, 0.0],
                             extent: [size as f32, size as f32],
                             depth_range: 0.0..=1.0,
-                        },
-                    ])),
+                        }],
+                        ..Default::default()
+                    }),
                     subpass: Some(PipelineSubpassType::BeginRenderPass(
                         Subpass::from(render_passes[id].clone(), 0).unwrap(),
                     )),
-                    rasterization_state: Some(RasterizationState::new()),
-                    multisample_state: Some(MultisampleState::new()),
-                    color_blend_state: Some(ColorBlendState::new(1)),
+                    rasterization_state: Some(RasterizationState::default()),
+                    multisample_state: Some(MultisampleState::default()),
+                    color_blend_state: Some(ColorBlendState::with_attachment_states(
+                        1,
+                        Default::default(),
+                    )),
                     ..GraphicsPipelineCreateInfo::layout(layout.clone())
                 },
             )
@@ -278,7 +287,7 @@ impl StereoCorrection {
                 texOffset: [0.5 * id as f32, 0.0],
             };
             let uniform = Buffer::from_data(
-                allocator,
+                allocator.clone(),
                 BufferCreateInfo {
                     usage: BufferUsage::UNIFORM_BUFFER,
                     ..Default::default()
@@ -321,7 +330,7 @@ impl StereoCorrection {
     pub fn correct(
         &self,
         cmdbuf_allocator: &StandardCommandBufferAllocator,
-        allocator: &StandardMemoryAllocator,
+        allocator: Arc<dyn MemoryAllocator>,
         after: impl GpuFuture,
         queue: &Arc<Queue>,
         output: Arc<Image>,
