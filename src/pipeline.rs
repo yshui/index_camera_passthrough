@@ -24,7 +24,6 @@ pub(crate) struct Pipeline {
     render_doc: Option<renderdoc::RenderDoc<renderdoc::V100>>,
     yuv_texture: Arc<VkImage>,
     textures: [Arc<VkImage>; 2],
-    ipd: f32,
     camera_config: Option<crate::vrapi::StereoCamera>,
 }
 
@@ -40,7 +39,6 @@ impl std::fmt::Debug for Pipeline {
                 "textures",
                 &self.textures.each_ref().map(|t| t.handle().as_raw()),
             )
-            .field("ipd", &self.ipd)
             .field("camera_config", &self.camera_config)
             .finish_non_exhaustive()
     }
@@ -211,10 +209,8 @@ impl Pipeline {
         descriptor_set_allocator: &StandardDescriptorSetAllocator,
         source_is_yuv: bool,
         display_mode: DisplayMode,
-        ipd: f32,
         camera_config: Option<crate::vrapi::StereoCamera>,
     ) -> Result<Self> {
-        log::info!("IPD: {}", ipd);
         // Allocate intermediate textures
         let yuv_texture = VkImage::new(
             allocator.clone(),
@@ -294,7 +290,6 @@ impl Pipeline {
             render_doc,
             textures,
             yuv_texture,
-            ipd,
             camera_config,
         })
     }
@@ -386,9 +381,5 @@ impl Pipeline {
     }
     pub(crate) fn capture_next_frame(&mut self) {
         self.capture = true;
-    }
-
-    pub(crate) fn set_ipd(&mut self, ipd: f32) {
-        self.ipd = ipd;
     }
 }

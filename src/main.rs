@@ -219,7 +219,6 @@ fn main() -> Result<()> {
         vrsys.vk_descriptor_set_allocator(),
         config.need_yuv_conversion,
         cfg.display_mode,
-        vrsys.ipd()?,
         camera_config,
     )?;
 
@@ -278,18 +277,13 @@ fn main() -> Result<()> {
         }
 
         // Handle OpenVR events
+        #[allow(clippy::never_loop)]
         while let Some(event) = vrsys.poll_next_event() {
-            //log::debug!("{:?}", unsafe {
-            //    std::mem::transmute::<_, openvr_sys2::EVREventType>(event.eventType)
-            //});
             match event {
                 vrapi::Event::RequestExit => {
                     log::info!("RequestExit");
                     vrsys.acknowledge_quit();
                     break 'main_loop;
-                }
-                vrapi::Event::IpdChanged(new_ipd) => {
-                    pipeline.set_ipd(new_ipd);
                 }
             }
         }

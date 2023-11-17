@@ -1,6 +1,6 @@
 use nalgebra::{matrix, Matrix4};
 use openvr_sys2::{ETrackedPropertyError, EVRInitError, EVRInputError, EVROverlayError};
-use openxr::ApplicationInfo;
+use openxr::{ApplicationInfo, OverlaySessionCreateFlagsEXTX};
 use std::{
     ffi::CString,
     mem::MaybeUninit,
@@ -88,8 +88,6 @@ pub struct Bounds {
 pub enum Event {
     /// The VR API asks us to exit
     RequestExit,
-    /// IPD has changed
-    IpdChanged(f32),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -110,7 +108,6 @@ pub(crate) trait VkContext {
 pub(crate) trait Vr: VkContext {
     type Error: Send + Sync + 'static;
     fn load_camera_paramter(&mut self) -> Option<StereoCamera>;
-    fn ipd(&self) -> Result<f32, Self::Error>;
     fn eye_to_head(&self) -> [Matrix4<f64>; 2];
     /// Submit the render texture to overlay.
     ///
@@ -166,9 +163,6 @@ impl<T: Vr, E: Send + Sync + 'static, F: Fn(<T as Vr>::Error) -> E> Vr for VrMap
     }
     fn load_camera_paramter(&mut self) -> Option<StereoCamera> {
         self.0.load_camera_paramter()
-    }
-    fn ipd(&self) -> Result<f32, Self::Error> {
-        self.0.ipd().map_err(&self.1)
     }
     fn eye_to_head(&self) -> [Matrix4<f64>; 2] {
         self.0.eye_to_head()
@@ -244,6 +238,7 @@ pub(crate) struct OpenVr {
     cmdbuf_allocator: StandardCommandBufferAllocator,
     descriptor_set_allocator: StandardDescriptorSetAllocator,
     render_texture: Option<Arc<vulkano::image::Image>>,
+    ipd: Option<f32>,
 }
 impl OpenVr {
     fn create_vk_device(
@@ -387,7 +382,24 @@ impl OpenVr {
             queue,
             cmdbuf_allocator,
             render_texture: None,
+            ipd: None,
         })
+    }
+    fn ipd(&mut self) -> Result<f32, OpenVrError> {
+        if let Some(ipd) = self.ipd {
+            return Ok(ipd);
+        }
+        let mut error = MaybeUninit::<_>::uninit();
+        unsafe {
+            let ipd = self.sys.pin_mut().GetFloatTrackedDeviceProperty(
+                0,
+                openvr_sys2::ETrackedDeviceProperty::Prop_UserIpdMeters_Float,
+                error.as_mut_ptr(),
+            );
+            error.assume_init().into_result()?;
+            self.ipd = Some(ipd);
+            Ok(ipd)
+        }
     }
     fn required_extensions(
         sys: &crate::openvr::VRSystem,
@@ -747,18 +759,6 @@ impl Vr for OpenVr {
             .into_result()
             .map_err(Into::into)
     }
-    fn ipd(&self) -> Result<f32, Self::Error> {
-        let mut error = MaybeUninit::<_>::uninit();
-        unsafe {
-            let ipd = self.sys.pin_mut().GetFloatTrackedDeviceProperty(
-                0,
-                openvr_sys2::ETrackedDeviceProperty::Prop_UserIpdMeters_Float,
-                error.as_mut_ptr(),
-            );
-            error.assume_init().into_result()?;
-            Ok(ipd)
-        }
-    }
     fn eye_to_head(&self) -> [Matrix4<f64>; 2] {
         let left_eye: Matrix4<_> = self
             .sys
@@ -785,21 +785,23 @@ impl Vr for OpenVr {
     }
     fn poll_next_event(&mut self) -> Option<Event> {
         use openvr_sys2::VREvent_t;
-        let openvr_event: VREvent_t = unsafe {
-            let mut event = MaybeUninit::uninit();
-            let has_event = self.sys.pin_mut().PollNextEvent(
-                event.as_mut_ptr() as *mut _,
-                std::mem::size_of::<openvr_sys2::VREvent_t>() as u32,
-            );
-            has_event.then(|| event.assume_init())
-        }?;
-        match openvr_sys2::EVREventType::try_from(openvr_event.eventType) {
-            Ok(openvr_sys2::EVREventType::VREvent_IpdChanged) => {
-                let ipd = unsafe { openvr_event.data.ipd.ipdMeters };
-                Some(Event::IpdChanged(ipd))
+        loop {
+            let openvr_event: VREvent_t = unsafe {
+                let mut event = MaybeUninit::uninit();
+                let has_event = self.sys.pin_mut().PollNextEvent(
+                    event.as_mut_ptr() as *mut _,
+                    std::mem::size_of::<openvr_sys2::VREvent_t>() as u32,
+                );
+                has_event.then(|| event.assume_init())
+            }?;
+            match openvr_sys2::EVREventType::try_from(openvr_event.eventType) {
+                Ok(openvr_sys2::EVREventType::VREvent_IpdChanged) => {
+                    let ipd = unsafe { openvr_event.data.ipd.ipdMeters };
+                    self.ipd = Some(ipd);
+                }
+                Ok(openvr_sys2::EVREventType::VREvent_Quit) => return Some(Event::RequestExit),
+                _ => (),
             }
-            Ok(openvr_sys2::EVREventType::VREvent_Quit) => Some(Event::RequestExit),
-            _ => None,
         }
     }
     fn update_action_state(&mut self) -> Result<(), Self::Error> {
@@ -857,6 +859,14 @@ pub(crate) struct OpenXr {
     allocator: Arc<StandardMemoryAllocator>,
     descriptor_set_allocator: StandardDescriptorSetAllocator,
     cmdbuf_allocator: StandardCommandBufferAllocator,
+    action_set: openxr::ActionSet,
+    action_button1: openxr::Action<bool>,
+    action_button2: openxr::Action<bool>,
+    action_debug: openxr::Action<bool>,
+
+    session: openxr::Session<openxr::Vulkan>,
+    frame_waiter: openxr::FrameWaiter,
+    frame_stream: openxr::FrameStream<openxr::Vulkan>,
 
     device: Arc<Device>,
     queue: Arc<Queue>,
@@ -994,6 +1004,37 @@ impl OpenXr {
             device.clone(),
             StandardDescriptorSetAllocatorCreateInfo::default(),
         );
+
+        let action_set = instance.create_action_set("main", "main", 0)?;
+        let overlay = openxr::sys::SessionCreateInfoOverlayEXTX {
+            ty: openxr::sys::SessionCreateInfoOverlayEXTX::TYPE,
+            next: std::ptr::null(),
+            create_flags: OverlaySessionCreateFlagsEXTX::EMPTY,
+            session_layers_placement: 0,
+        };
+        let binding = openxr::sys::GraphicsBindingVulkanKHR {
+            ty: openxr::sys::GraphicsBindingVulkanKHR::TYPE,
+            next: &overlay as *const _ as *const _,
+            instance: vk_instance.handle().as_raw() as _,
+            physical_device: device.physical_device().handle().as_raw() as _,
+            device: device.handle().as_raw() as _,
+            queue_family_index: queue.queue_family_index(),
+            queue_index: queue.id_within_family(),
+        };
+        let info = openxr::sys::SessionCreateInfo {
+            ty: openxr::sys::SessionCreateInfo::TYPE,
+            next: &binding as *const _ as *const _,
+            create_flags: Default::default(),
+            system_id: system,
+        };
+        let mut out = openxr::sys::Session::NULL;
+        let ret = unsafe { (instance.fp().create_session)(instance.as_raw(), &info, &mut out) };
+        if ret.into_raw() < 0 {
+            return Err(ret.into());
+        }
+        let (session, frame_waiter, frame_stream) = unsafe {
+            openxr::Session::<openxr::Vulkan>::from_raw(instance.clone(), out, Box::new(()))
+        };
         Ok(Self {
             entry,
             instance,
@@ -1002,6 +1043,14 @@ impl OpenXr {
             overlay_transform: Matrix4::identity(),
             position_mode: PositionMode::default(),
             display_mode: DisplayMode::default(),
+            action_button1: action_set.create_action("button1", "Button1", &[])?,
+            action_button2: action_set.create_action("button2", "Button2", &[])?,
+            action_debug: action_set.create_action("debug", "Debug", &[])?,
+            action_set,
+
+            session,
+            frame_waiter,
+            frame_stream,
 
             allocator,
             descriptor_set_allocator,
@@ -1051,10 +1100,6 @@ impl Vr for OpenXr {
         None
     }
 
-    fn ipd(&self) -> Result<f32, Self::Error> {
-        todo!()
-    }
-
     fn eye_to_head(&self) -> [Matrix4<f64>; 2] {
         todo!()
     }
@@ -1097,10 +1142,21 @@ impl Vr for OpenXr {
     }
 
     fn update_action_state(&mut self) -> Result<(), Self::Error> {
-        todo!()
+        self.session
+            .sync_actions(&[openxr::ActiveActionSet::new(&self.action_set)])?;
+        Ok(())
     }
 
     fn get_action_state(&self, action: Action) -> Result<bool, Self::Error> {
-        todo!()
+        Ok(match action {
+            Action::Button1 => self
+                .action_button1
+                .state(&self.session, openxr::Path::NULL)?,
+            Action::Button2 => self
+                .action_button2
+                .state(&self.session, openxr::Path::NULL)?,
+            Action::Debug => self.action_debug.state(&self.session, openxr::Path::NULL)?,
+        }
+        .current_state)
     }
 }
