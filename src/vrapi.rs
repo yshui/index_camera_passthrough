@@ -1,6 +1,6 @@
 use nalgebra::{matrix, Matrix4};
 use openvr_sys2::{ETrackedPropertyError, EVRInitError, EVRInputError, EVROverlayError};
-use openxr::{ApplicationInfo, OverlaySessionCreateFlagsEXTX};
+use openxr::{ApplicationInfo, OverlaySessionCreateFlagsEXTX, EventDataBuffer};
 use std::{
     ffi::CString,
     mem::MaybeUninit,
@@ -108,7 +108,6 @@ pub(crate) trait VkContext {
 pub(crate) trait Vr: VkContext {
     type Error: Send + Sync + 'static;
     fn load_camera_paramter(&mut self) -> Option<StereoCamera>;
-    fn eye_to_head(&self) -> [Matrix4<f64>; 2];
     /// Submit the render texture to overlay.
     ///
     /// Must have called `render_texture` before calling this function.
@@ -163,9 +162,6 @@ impl<T: Vr, E: Send + Sync + 'static, F: Fn(<T as Vr>::Error) -> E> Vr for VrMap
     }
     fn load_camera_paramter(&mut self) -> Option<StereoCamera> {
         self.0.load_camera_paramter()
-    }
-    fn eye_to_head(&self) -> [Matrix4<f64>; 2] {
-        self.0.eye_to_head()
     }
     fn submit_texture(
         &mut self,
@@ -440,6 +436,19 @@ impl OpenVr {
         }
         .into_result()
         .map_err(Into::into)
+    }
+    fn eye_to_head(&self) -> [Matrix4<f64>; 2] {
+        let left_eye: Matrix4<_> = self
+            .sys
+            .pin_mut()
+            .GetEyeToHeadTransform(openvr_sys2::EVREye::Eye_Left)
+            .into();
+        let right_eye: Matrix4<_> = self
+            .sys
+            .pin_mut()
+            .GetEyeToHeadTransform(openvr_sys2::EVREye::Eye_Right)
+            .into();
+        [left_eye, right_eye]
     }
 }
 
@@ -758,19 +767,6 @@ impl Vr for OpenVr {
             .HideOverlay(self.handle)
             .into_result()
             .map_err(Into::into)
-    }
-    fn eye_to_head(&self) -> [Matrix4<f64>; 2] {
-        let left_eye: Matrix4<_> = self
-            .sys
-            .pin_mut()
-            .GetEyeToHeadTransform(openvr_sys2::EVREye::Eye_Left)
-            .into();
-        let right_eye: Matrix4<_> = self
-            .sys
-            .pin_mut()
-            .GetEyeToHeadTransform(openvr_sys2::EVREye::Eye_Right)
-            .into();
-        [left_eye, right_eye]
     }
     fn set_position_mode(&mut self, mode: PositionMode) -> Result<(), Self::Error> {
         self.position_mode = mode;
@@ -1100,10 +1096,6 @@ impl Vr for OpenXr {
         None
     }
 
-    fn eye_to_head(&self) -> [Matrix4<f64>; 2] {
-        todo!()
-    }
-
     fn submit_texture(
         &mut self,
         layout: ImageLayout,
@@ -1138,6 +1130,12 @@ impl Vr for OpenXr {
     }
 
     fn poll_next_event(&mut self) -> Option<Event> {
+        let mut event = EventDataBuffer::default();
+        let Ok(event) = self.instance.poll_event(&mut event) else {
+            // if we failed to poll event, we should give up and exit
+            return Some(Event::RequestExit)
+        };
+        let event = event?;
         todo!()
     }
 
