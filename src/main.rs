@@ -395,11 +395,14 @@ fn main() -> Result<()> {
         match state.turn() {
             events::Action::ShowOverlay => {
                 vrsys.show_overlay()?;
-                maybe_current_frame = Some(FrameInfo {
-                    frame: splash.clone(),
-                    frame_time: None,
-                    bypass_pipeline: true,
-                });
+                {
+                    let mut other_frame = frame.lock().unwrap();
+                    *other_frame = Some(FrameInfo {
+                        frame: splash.clone(),
+                        frame_time: None,
+                        bypass_pipeline: true,
+                    });
+                }
                 *capture.lock().unwrap() = true;
                 capture_notify.notify_all();
             }
@@ -411,6 +414,7 @@ fn main() -> Result<()> {
             _ => (),
         }
     }
+    running.store(false, std::sync::atomic::Ordering::Relaxed);
     // Wake up the camera thread
     *capture.lock().unwrap() = true;
     capture_notify.notify_all();
