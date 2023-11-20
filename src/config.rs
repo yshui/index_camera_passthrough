@@ -81,6 +81,12 @@ impl DisplayMode {
             _ => None,
         }
     }
+    pub(crate) fn is_stereo(&self) -> bool {
+        match self {
+            DisplayMode::Stereo { .. } | DisplayMode::Direct => true,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -108,7 +114,6 @@ pub enum Backend {
     OpenXR,
 }
 
-
 impl From<Button> for openvr_sys2::EVRButtonId {
     fn from(b: Button) -> Self {
         use openvr_sys2::EVRButtonId;
@@ -124,7 +129,7 @@ impl From<Button> for openvr_sys2::EVRButtonId {
 
 impl PartialEq<openvr_sys2::EVRButtonId> for Button {
     fn eq(&self, other: &openvr_sys2::EVRButtonId) -> bool {
-        openvr_sys2::EVRButtonId::from(*self) == *other
+        &openvr_sys2::EVRButtonId::from(*self) == other
     }
 }
 

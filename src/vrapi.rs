@@ -1,6 +1,11 @@
+use ash::vk::ExtSwapchainColorspaceFn;
+use humantime_serde::re;
+use itertools::Itertools;
 use nalgebra::{matrix, Matrix4};
 use openvr_sys2::{ETrackedPropertyError, EVRInitError, EVRInputError, EVROverlayError};
-use openxr::{ApplicationInfo, OverlaySessionCreateFlagsEXTX, EventDataBuffer};
+use openxr::{
+    ApplicationInfo, EnvironmentBlendMode, EventDataBuffer, OverlaySessionCreateFlagsEXTX,
+};
 use std::{
     ffi::CString,
     mem::MaybeUninit,
@@ -121,6 +126,13 @@ pub(crate) trait Vr: VkContext {
         elapsed: Duration,
         fov: &[[f64; 2]; 2],
     ) -> Result<(), Self::Error>;
+    /// Refresh the overlay using the latest submitted camera texture.
+    fn refresh(&mut self) -> Result<(), Self::Error>;
+    /// Whether our render loop is synchronized with the VR runtime.
+    ///
+    /// If this is true, `get_render_texture`, `submit_texture` and `refresh` should be synchronized with
+    /// the VR runtime.
+    fn is_synchronized(&self) -> bool;
     fn set_position_mode(&mut self, mode: PositionMode) -> Result<(), Self::Error>;
     /// Change the display mode of the overlay.
     ///
@@ -129,8 +141,12 @@ pub(crate) trait Vr: VkContext {
     fn show_overlay(&mut self) -> Result<(), Self::Error>;
     fn hide_overlay(&mut self) -> Result<(), Self::Error>;
     fn acknowledge_quit(&mut self);
-    fn get_render_texture(&mut self) -> Result<Arc<vulkano::image::Image>, Self::Error>;
-    fn poll_next_event(&mut self) -> Option<Event>;
+    /// Acquire a render texture that can be submitted to the overlay.
+    ///
+    /// Once this is called, the render texture is considered acquired until it's released by calling `submit_texture`.
+    /// Caller should upload camera frames to the render texture, then call `submit_texture`.
+    fn get_render_texture(&mut self) -> Result<Option<Arc<vulkano::image::Image>>, Self::Error>;
+    fn poll_next_event(&mut self) -> Result<Option<Event>, Self::Error>;
     fn update_action_state(&mut self) -> Result<(), Self::Error>;
     fn get_action_state(&self, action: Action) -> Result<bool, Self::Error>;
 }
@@ -171,6 +187,12 @@ impl<T: Vr, E: Send + Sync + 'static, F: Fn(<T as Vr>::Error) -> E> Vr for VrMap
     ) -> Result<(), Self::Error> {
         self.0.submit_texture(layout, elapsed, fov).map_err(&self.1)
     }
+    fn refresh(&mut self) -> Result<(), Self::Error> {
+        self.0.refresh().map_err(&self.1)
+    }
+    fn is_synchronized(&self) -> bool {
+        self.0.is_synchronized()
+    }
     fn show_overlay(&mut self) -> Result<(), Self::Error> {
         self.0.show_overlay().map_err(&self.1)
     }
@@ -180,14 +202,14 @@ impl<T: Vr, E: Send + Sync + 'static, F: Fn(<T as Vr>::Error) -> E> Vr for VrMap
     fn set_position_mode(&mut self, mode: PositionMode) -> Result<(), Self::Error> {
         self.0.set_position_mode(mode).map_err(&self.1)
     }
-    fn get_render_texture(&mut self) -> Result<Arc<vulkano::image::Image>, Self::Error> {
+    fn get_render_texture(&mut self) -> Result<Option<Arc<vulkano::image::Image>>, Self::Error> {
         self.0.get_render_texture().map_err(&self.1)
     }
     fn hide_overlay(&mut self) -> Result<(), Self::Error> {
         self.0.hide_overlay().map_err(&self.1)
     }
-    fn poll_next_event(&mut self) -> Option<Event> {
-        self.0.poll_next_event()
+    fn poll_next_event(&mut self) -> Result<Option<Event>, Self::Error> {
+        self.0.poll_next_event().map_err(&self.1)
     }
     fn get_action_state(&self, action: Action) -> Result<bool, Self::Error> {
         self.0.get_action_state(action).map_err(&self.1)
@@ -610,12 +632,14 @@ impl Vr for OpenVr {
             Some(lhcfg)
         }
     }
-    fn get_render_texture(&mut self) -> Result<Arc<vulkano::image::Image>, Self::Error> {
+    fn get_render_texture(&mut self) -> Result<Option<Arc<vulkano::image::Image>>, Self::Error> {
+        // log::debug!("get_render_texture");
         if self.display_mode.projection_mode().is_none() {
             assert!(self.render_texture.is_none());
             self.render_texture = Some(crate::create_submittable_image(self.allocator.clone())?);
         }
-        Ok(self.render_texture.clone().unwrap())
+        assert!(self.render_texture.is_some());
+        Ok(self.render_texture.clone())
     }
     fn submit_texture(
         &mut self,
@@ -695,13 +719,18 @@ impl Vr for OpenVr {
                 .map_err(Into::into)
         }
     }
+    fn is_synchronized(&self) -> bool {
+        false
+    }
+    fn refresh(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
     fn set_display_mode(&mut self, mode: DisplayMode) -> Result<(), Self::Error> {
         if self.display_mode == mode {
             return Ok(());
         }
         self.display_mode = mode;
-        let is_stereo = mode.projection_mode();
-        if let Some(projection_mode) = is_stereo {
+        if let Some(projection_mode) = self.display_mode.projection_mode() {
             let camera_calib = self.load_camera_paramter();
             if self.projector.is_none() {
                 self.render_texture =
@@ -727,7 +756,7 @@ impl Vr for OpenVr {
             .SetOverlayFlag(
                 self.handle,
                 openvr_sys2::VROverlayFlags::VROverlayFlags_SideBySide_Parallel,
-                is_stereo.is_some(),
+                self.display_mode.is_stereo(),
             )
             .into_result()?;
         let bounds = match mode {
@@ -779,23 +808,25 @@ impl Vr for OpenVr {
     fn acknowledge_quit(&mut self) {
         self.sys.pin_mut().AcknowledgeQuit_Exiting();
     }
-    fn poll_next_event(&mut self) -> Option<Event> {
+    fn poll_next_event(&mut self) -> Result<Option<Event>, Self::Error> {
         use openvr_sys2::VREvent_t;
         loop {
-            let openvr_event: VREvent_t = unsafe {
+            let Some(openvr_event): Option<VREvent_t> = (unsafe {
                 let mut event = MaybeUninit::uninit();
                 let has_event = self.sys.pin_mut().PollNextEvent(
                     event.as_mut_ptr() as *mut _,
                     std::mem::size_of::<openvr_sys2::VREvent_t>() as u32,
                 );
                 has_event.then(|| event.assume_init())
-            }?;
+            }) else {
+                return Ok(None);
+            };
             match openvr_sys2::EVREventType::try_from(openvr_event.eventType) {
                 Ok(openvr_sys2::EVREventType::VREvent_IpdChanged) => {
                     let ipd = unsafe { openvr_event.data.ipd.ipdMeters };
                     self.ipd = Some(ipd);
                 }
-                Ok(openvr_sys2::EVREventType::VREvent_Quit) => return Some(Event::RequestExit),
+                Ok(openvr_sys2::EVREventType::VREvent_Quit) => return Ok(Some(Event::RequestExit)),
                 _ => (),
             }
         }
@@ -822,7 +853,7 @@ impl Vr for OpenVr {
     }
     fn get_action_state(&self, action: Action) -> Result<bool, Self::Error> {
         let action_handle = self.buttons[action as usize];
-        //log::debug!("action_handle: {action_handle:x}");
+        // log::debug!("getting action {action:?}");
         let vrinput = unsafe { Pin::new_unchecked(&mut *openvr_sys2::VRInput()) };
         let action_data = unsafe {
             let mut action_data = MaybeUninit::uninit();
@@ -840,6 +871,7 @@ impl Vr for OpenVr {
             }
             action_data.assume_init()
         };
+        // log::debug!("action_data: {}", action_data.bState);
         Ok(action_data.bState)
     }
 }
@@ -860,9 +892,11 @@ pub(crate) struct OpenXr {
     action_button2: openxr::Action<bool>,
     action_debug: openxr::Action<bool>,
 
+    session_state: openxr::SessionState,
     session: openxr::Session<openxr::Vulkan>,
     frame_waiter: openxr::FrameWaiter,
     frame_stream: openxr::FrameStream<openxr::Vulkan>,
+    swapchain: openxr::Swapchain<openxr::Vulkan>,
 
     device: Arc<Device>,
     queue: Arc<Queue>,
@@ -883,6 +917,8 @@ pub(crate) enum OpenXrError {
     RawVk(#[from] ash::vk::Result),
     #[error("no graphics queue found")]
     NoGraphicsQueue,
+    #[error("no usable texture format")]
+    NoFormat,
 }
 
 impl OpenXr {
@@ -1031,6 +1067,24 @@ impl OpenXr {
         let (session, frame_waiter, frame_stream) = unsafe {
             openxr::Session::<openxr::Vulkan>::from_raw(instance.clone(), out, Box::new(()))
         };
+        let formats = session.enumerate_swapchain_formats()?;
+        if !formats
+            .iter()
+            .contains(&(vulkano::format::Format::R8G8B8A8_UNORM as u32))
+        {
+            return Err(OpenXrError::NoFormat);
+        }
+        let swapchain = session.create_swapchain(&openxr::SwapchainCreateInfo {
+            array_size: 1,
+            face_count: 1,
+            create_flags: Default::default(),
+            usage_flags: openxr::SwapchainUsageFlags::COLOR_ATTACHMENT,
+            format: vulkano::format::Format::R8G8B8A8_UNORM as u32,
+            sample_count: 1,
+            width: crate::CAMERA_SIZE * 2,
+            height: crate::CAMERA_SIZE,
+            mip_count: 1,
+        })?;
         Ok(Self {
             entry,
             instance,
@@ -1044,9 +1098,11 @@ impl OpenXr {
             action_debug: action_set.create_action("debug", "Debug", &[])?,
             action_set,
 
+            session_state: openxr::SessionState::IDLE,
             session,
             frame_waiter,
             frame_stream,
+            swapchain,
 
             allocator,
             descriptor_set_allocator,
@@ -1105,7 +1161,25 @@ impl Vr for OpenXr {
         todo!()
     }
 
-    fn get_render_texture(&mut self) -> Result<Arc<vulkano::image::Image>, Self::Error> {
+    fn is_synchronized(&self) -> bool {
+        true
+    }
+
+    fn refresh(&mut self) -> Result<(), Self::Error> {
+        todo!()
+    }
+
+    fn get_render_texture(&mut self) -> Result<Option<Arc<vulkano::image::Image>>, Self::Error> {
+        let frame_state = self.frame_waiter.wait()?;
+        if !frame_state.should_render {
+            self.frame_stream.begin()?;
+            self.frame_stream.end(
+                frame_state.predicted_display_time,
+                EnvironmentBlendMode::ALPHA_BLEND,
+                &[],
+            )?;
+            return Ok(None);
+        }
         todo!()
     }
 
@@ -1116,11 +1190,21 @@ impl Vr for OpenXr {
 
     fn show_overlay(&mut self) -> Result<(), Self::Error> {
         self.overlay_visible = true;
+        if self.session_state == openxr::SessionState::READY {
+            self.session
+                .begin(openxr::ViewConfigurationType::PRIMARY_STEREO)?;
+        }
         Ok(())
     }
 
     fn hide_overlay(&mut self) -> Result<(), Self::Error> {
         self.overlay_visible = false;
+        if self.session_state != openxr::SessionState::EXITING
+            && self.session_state != openxr::SessionState::IDLE
+            && self.session_state != openxr::SessionState::STOPPING
+        {
+            self.session.end()?;
+        }
         Ok(())
     }
 
@@ -1129,14 +1213,41 @@ impl Vr for OpenXr {
         Ok(())
     }
 
-    fn poll_next_event(&mut self) -> Option<Event> {
+    fn poll_next_event(&mut self) -> Result<Option<Event>, Self::Error> {
         let mut event = EventDataBuffer::default();
-        let Ok(event) = self.instance.poll_event(&mut event) else {
-            // if we failed to poll event, we should give up and exit
-            return Some(Event::RequestExit)
+        let ret = loop {
+            let event = self.instance.poll_event(&mut event)?;
+            let Some(event) = event else { break None };
+            use openxr::Event as XrEvent;
+            match event {
+                XrEvent::InstanceLossPending(_) => break Some(Event::RequestExit),
+                XrEvent::SessionStateChanged(ssc) => {
+                    use openxr::SessionState;
+                    self.session_state = ssc.state();
+                    match self.session_state {
+                        SessionState::EXITING | SessionState::LOSS_PENDING => {
+                            self.session.end();
+                            break Some(Event::RequestExit);
+                        }
+                        SessionState::READY => {
+                            if self.overlay_visible {
+                                self.session
+                                    .begin(openxr::ViewConfigurationType::PRIMARY_STEREO)?;
+                            }
+                        }
+                        SessionState::STOPPING => {
+                            if self.overlay_visible {
+                                self.session.end()?;
+                            }
+                        }
+                        _ => (),
+                    }
+                }
+                XrEvent::EventsLost(_) => (), // ? should we do something?
+                _ => (),
+            }
         };
-        let event = event?;
-        todo!()
+        Ok(ret)
     }
 
     fn update_action_state(&mut self) -> Result<(), Self::Error> {

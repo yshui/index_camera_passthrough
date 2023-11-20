@@ -17,13 +17,12 @@ mod steam;
 mod vrapi;
 mod yuv;
 
-use std::sync::Arc;
+use std::sync::{atomic::AtomicBool, Arc, Mutex};
 
 use anyhow::{anyhow, Context, Result};
 
 use v4l::video::Capture;
 use vulkano::{
-    command_buffer::allocator::{CommandBufferAllocator, StandardCommandBufferAllocator},
     image::{AllocateImageError, Image, ImageCreateInfo, ImageLayout, ImageUsage},
     memory::allocator::{AllocationCreateInfo, MemoryAllocator, MemoryTypeFilter},
     sync::GpuFuture,
@@ -35,7 +34,7 @@ const CAMERA_SIZE: u32 = 960;
 #[allow(unused_imports)]
 use log::info;
 
-use crate::{config::Backend, vrapi::VrExt};
+use crate::{config::Backend, pipeline::submit_cpu_image, vrapi::VrExt};
 
 static APP_KEY: &str = "index_camera_passthrough_rs\0";
 static APP_NAME: &str = "Camera\0";
@@ -99,26 +98,79 @@ fn create_submittable_image(
     )
 }
 
-fn load_splash(
-    output: Arc<Image>,
-    cmdbuf_allocator: &(impl CommandBufferAllocator + 'static),
-    allocator: Arc<dyn MemoryAllocator>,
-    queue: Arc<vulkano::device::Queue>,
-) -> Result<()> {
+struct FrameInfo {
+    frame: Vec<u8>,
+    frame_time: Option<std::time::Instant>,
+    bypass_pipeline: bool,
+}
+
+fn load_splash() -> Result<Vec<u8>> {
     log::debug!("loading splash");
     let img = image::load_from_memory_with_format(SPLASH_IMAGE, image::ImageFormat::Png)?
         .into_rgba8()
         .into_raw();
-    queue
-        .device()
-        .set_debug_utils_object_name(&output, Some("splash"))?;
-    let future =
-        pipeline::submit_cpu_image(&img, cmdbuf_allocator, allocator, &queue, output.clone())?;
-    future.flush()?;
-    future.then_signal_fence().wait(None)?;
 
     log::debug!("splash loaded");
-    Ok(())
+    Ok(img)
+}
+
+struct CameraThread {
+    notify_new_frame: Arc<std::sync::Condvar>,
+    running: Arc<AtomicBool>,
+    capture: Arc<Mutex<bool>>,
+    capture_notify: Arc<std::sync::Condvar>,
+    frame: Arc<Mutex<Option<FrameInfo>>>,
+    camera: v4l::Device,
+}
+
+impl CameraThread {
+    fn run(self) -> Result<()> {
+        let Self {
+            notify_new_frame,
+            running,
+            capture,
+            capture_notify,
+            frame,
+            camera,
+        } = self;
+
+        let mut first_frame_time = None;
+        // We want to make the latency as low as possible, so only set a single buffer.
+        let mut video_stream =
+            v4l::prelude::MmapStream::with_buffers(&camera, v4l::buffer::Type::VideoCapture, 1)?;
+        while running.load(std::sync::atomic::Ordering::Relaxed) {
+            {
+                let capture = capture.lock().unwrap();
+                drop(capture_notify.wait_while(capture, |&mut c| !c).unwrap());
+            }
+            let (frame_data, metadata) = v4l::io::traits::CaptureStream::next(&mut video_stream)?;
+            let frame_time = if let Some((camera_reference, reference)) = first_frame_time {
+                let camera_elapsed =
+                    std::time::Duration::from(metadata.timestamp) - camera_reference;
+                reference + camera_elapsed
+            } else {
+                let now = std::time::Instant::now();
+                first_frame_time = Some((metadata.timestamp.into(), now));
+                now
+            };
+            let mut frame = frame.lock().unwrap();
+            if let Some(frame) = &mut *frame {
+                frame.frame.resize(frame_data.len(), 0);
+                frame.frame.copy_from_slice(frame_data);
+                frame.frame_time = Some(frame_time);
+                frame.bypass_pipeline = false;
+            } else {
+                *frame = Some(FrameInfo {
+                    frame: frame_data.to_vec(),
+                    frame_time: Some(frame_time),
+                    bypass_pipeline: false,
+                });
+            }
+            // log::debug!("got camera frame {}", frame_data.len());
+            notify_new_frame.notify_all();
+        }
+        Ok(())
+    }
 }
 
 fn main() -> Result<()> {
@@ -149,9 +201,12 @@ fn main() -> Result<()> {
     ))?;
     log::info!("{}", format);
     camera.set_params(&v4l::video::capture::Parameters::with_fps(54))?;
-    // We want to make the latency as low as possible, so only set a single buffer.
-    let mut video_stream =
-        v4l::prelude::MmapStream::with_buffers(&camera, v4l::buffer::Type::VideoCapture, 1)?;
+    let splash = load_splash()?;
+    let frame = Arc::new(Mutex::new(Some(FrameInfo {
+        frame: splash.clone(),
+        frame_time: None,
+        bypass_pipeline: true,
+    })));
 
     let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
     let r = running.clone();
@@ -160,6 +215,20 @@ fn main() -> Result<()> {
         r.store(false, std::sync::atomic::Ordering::Relaxed);
     })
     .expect("Error setting Ctrl-C handler");
+
+    let capture = Arc::new(Mutex::new(false));
+    let capture_notify = Arc::new(std::sync::Condvar::new());
+    let notify_new_frame = Arc::new(std::sync::Condvar::new());
+    let camera_thread = CameraThread {
+        notify_new_frame: notify_new_frame.clone(),
+        running: running.clone(),
+        capture: capture.clone(),
+        capture_notify: capture_notify.clone(),
+        frame: frame.clone(),
+        camera,
+    };
+    let camera_thread = std::thread::spawn(move || camera_thread.run());
+
     log::info!("{:?}", cfg.backend);
     let mut vrsys = match cfg.backend {
         Backend::OpenVR => crate::vrapi::OpenVr::new(&xdg)?.boxed(),
@@ -167,18 +236,6 @@ fn main() -> Result<()> {
     };
     let instance = vrsys.vk_instance();
     let (device, queue) = vrsys.vk_device(&instance);
-
-    let cmdbuf_allocator = StandardCommandBufferAllocator::new(
-        device.clone(),
-        vulkano::command_buffer::allocator::StandardCommandBufferAllocatorCreateInfo::default(),
-    );
-
-    load_splash(
-        vrsys.get_render_texture()?,
-        &cmdbuf_allocator,
-        vrsys.vk_allocator(),
-        queue.clone(),
-    )?;
 
     // Create a VROverlay
     vrsys.set_display_mode(config::DisplayMode::Direct)?;
@@ -191,19 +248,11 @@ fn main() -> Result<()> {
 
     vrsys.set_position_mode(cfg.overlay.position)?;
 
-    // Show splash screen
-    log::debug!("showing splash");
-    vrsys.submit_texture(
-        vulkano::image::ImageLayout::ColorAttachmentOptimal,
-        std::time::Duration::ZERO,
-        &[[0., 0.], [0., 0.]],
-    )?;
-
     // Show overlay
     log::debug!("showing overlay");
     vrsys.show_overlay()?;
-
-    vrsys.set_display_mode(cfg.display_mode)?;
+    *capture.lock().unwrap() = true;
+    capture_notify.notify_all();
 
     // TODO: don't hardcode this
     struct AppConfig {
@@ -224,51 +273,94 @@ fn main() -> Result<()> {
 
     log::debug!("pipeline: {pipeline:?}");
 
-    // Fetch the first camera frame
-    let (mut frame, mut metadata) = v4l::io::traits::CaptureStream::next(&mut video_stream)?;
-    let first_camera_frame_timestamp: std::time::Duration = metadata.timestamp.into();
-    let render_start_instant = std::time::Instant::now();
-
     let mut state = events::State::new(cfg.open_delay);
     let mut debug_pressed = false;
+    let mut maybe_current_frame: Option<FrameInfo> = None;
+    let mut frame_changed = false;
+    let is_synchronized = vrsys.is_synchronized();
     'main_loop: loop {
+        // If synchronized, get the new frame if available, and refresh with existing frame if not;
+        // otherwise wait for the next frame.
         if state.visible() {
-            // We try to get the pose at the time when the camera frame is captured. GetDeviceToAbsoluteTrackingPose
-            // doesn't specifically say if a negative time offset will work...
-            // also, do this as early as possible.
-            let frame_time = Into::<std::time::Duration>::into(metadata.timestamp)
-                - first_camera_frame_timestamp;
-            log::trace!(
-                "{:?} {:?}",
-                std::time::Instant::now() - render_start_instant,
-                frame_time
-            );
-            let mut elapsed = std::time::Instant::now() - render_start_instant;
-            if elapsed > frame_time {
-                elapsed -= frame_time;
-            } else {
-                elapsed = std::time::Duration::ZERO;
+            let mut other_frame = frame.lock().unwrap();
+            while !frame_changed {
+                let new_frame_elapsed = other_frame.as_ref().map(|new_frame| new_frame.frame_time);
+                let current_frame_elapsed = maybe_current_frame
+                    .as_ref()
+                    .map(|current_frame| current_frame.frame_time);
+                frame_changed = new_frame_elapsed > current_frame_elapsed;
+                if frame_changed {
+                    std::mem::swap(&mut maybe_current_frame, &mut *other_frame);
+                    // log::debug!("frame changed");
+                } else if is_synchronized {
+                    // Don't wait if we are obliged to synchronize with VR runtime
+                    break;
+                } else {
+                    other_frame = notify_new_frame.wait(other_frame).unwrap();
+                }
             }
-            // Allocate final image
-            let output = vrsys.get_render_texture()?;
+            drop(other_frame);
+            let Some(current_frame) = maybe_current_frame.as_ref() else {
+                // Should never happen, because we should at least have the splash screen
+                log::error!("No frame");
+                continue;
+            };
+            // log::debug!("frame bypass pipeline: {}", current_frame.bypass_pipeline);
+            if current_frame.bypass_pipeline {
+                vrsys.set_display_mode(config::DisplayMode::Direct)?;
+            } else {
+                vrsys.set_display_mode(cfg.display_mode)?;
+            }
 
-            let future = pipeline.run(
-                &queue,
-                vrsys.vk_allocator(),
-                vrsys.vk_command_buffer_allocator(),
-                frame,
-                output.clone(),
-            )?;
-            //println!("submission: {:?}", submission);
-            future.flush()?; // can't use then_signal_fence_and_flush() because of a vulkano bug
-            future.then_signal_fence().wait(None)?;
+            if frame_changed {
+                // We try to get the pose at the time when the camera frame is captured. GetDeviceToAbsoluteTrackingPose
+                // doesn't specifically say if a negative time offset will work...
+                // also, do this as early as possible.
+                let elapsed = current_frame
+                    .frame_time
+                    .map(|frame_time| std::time::Instant::now() - frame_time)
+                    .unwrap_or_default();
+                log::trace!("elapsed: {elapsed:?}");
+                // Allocate final image
+                if let Some(output) = vrsys.get_render_texture()? {
+                    if current_frame.bypass_pipeline {
+                        let future = submit_cpu_image(
+                            &current_frame.frame,
+                            vrsys.vk_command_buffer_allocator(),
+                            vrsys.vk_allocator(),
+                            &queue,
+                            output,
+                        )?;
+                        future.flush()?;
+                        future.then_signal_fence().wait(None)?;
+                    } else {
+                        let future = pipeline.run(
+                            &queue,
+                            vrsys.vk_allocator(),
+                            vrsys.vk_command_buffer_allocator(),
+                            &current_frame.frame,
+                            output.clone(),
+                        )?;
+                        //println!("submission: {:?}", submission);
+                        future.flush()?; // can't use then_signal_fence_and_flush() because of a vulkano bug
+                        future.then_signal_fence().wait(None)?;
+                    }
 
-            // Submit the texture
-            vrsys.submit_texture(
-                ImageLayout::ColorAttachmentOptimal,
-                elapsed,
-                &pipeline.fov(),
-            )?;
+                    // Submit the texture
+                    vrsys.submit_texture(
+                        ImageLayout::ColorAttachmentOptimal,
+                        elapsed,
+                        &pipeline.fov(),
+                    )?;
+                    frame_changed = false;
+                }
+            } else {
+                vrsys.refresh()?;
+            }
+        } else if !is_synchronized {
+            // Not synchronized, and we didn't wait for new camera frame because we are not visible.
+            // We have to throttle our main loop.
+            std::thread::sleep(std::time::Duration::from_millis(100));
         }
 
         // Handle Ctrl-C
@@ -278,7 +370,7 @@ fn main() -> Result<()> {
 
         // Handle OpenVR events
         #[allow(clippy::never_loop)]
-        while let Some(event) = vrsys.poll_next_event() {
+        while let Some(event) = vrsys.poll_next_event()? {
             match event {
                 vrapi::Event::RequestExit => {
                     log::info!("RequestExit");
@@ -301,18 +393,27 @@ fn main() -> Result<()> {
         }
         state.handle(&*vrsys)?;
         match state.turn() {
-            events::Action::ShowOverlay => vrsys.show_overlay()?,
-            events::Action::HideOverlay => vrsys.hide_overlay()?,
+            events::Action::ShowOverlay => {
+                vrsys.show_overlay()?;
+                maybe_current_frame = Some(FrameInfo {
+                    frame: splash.clone(),
+                    frame_time: None,
+                    bypass_pipeline: true,
+                });
+                *capture.lock().unwrap() = true;
+                capture_notify.notify_all();
+            }
+            events::Action::HideOverlay => {
+                vrsys.hide_overlay()?;
+                maybe_current_frame = None;
+                *capture.lock().unwrap() = false;
+            }
             _ => (),
         }
-
-        std::thread::sleep(state.interval());
-
-        if state.visible() {
-            // Fetch next frame only when overlay is visible
-            (frame, metadata) = v4l::io::traits::CaptureStream::next(&mut video_stream)?;
-        }
     }
-
+    // Wake up the camera thread
+    *capture.lock().unwrap() = true;
+    capture_notify.notify_all();
+    camera_thread.join().unwrap()?;
     Ok(())
 }

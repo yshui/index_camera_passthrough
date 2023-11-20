@@ -24,15 +24,6 @@ impl State {
         self.visible
     }
 
-    /// How long should we wait between frames
-    pub fn interval(&self) -> Duration {
-        if self.visible {
-            Duration::ZERO
-        } else {
-            Duration::from_millis(100)
-        }
-    }
-
     pub fn new(delay: Duration) -> Self {
         Self {
             visible: true,
@@ -48,6 +39,7 @@ impl State {
         if vrsys.get_action_state(crate::vrapi::Action::Button2)? {
             button_pressed += 1;
         }
+        log::trace!("Button pressed: {}", button_pressed);
         match (&self.state, button_pressed) {
             (InternalState::Refractory, 0) => {
                 log::debug!("Refractory -> Armed");
