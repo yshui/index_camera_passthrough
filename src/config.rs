@@ -1,3 +1,4 @@
+use nalgebra::{geometry::Transform3, TAffine, Affine3, TCategory};
 use serde::{Deserialize, Serialize};
 
 /// Because your eye and the camera is at different physical locations, it is impossible
@@ -21,6 +22,24 @@ impl Default for ProjectionMode {
 pub const fn default_overlay_distance() -> f32 {
     1.0
 }
+fn serialize_transform<S>(transform: &Affine3<f32>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    let mut m = transform.matrix().clone();
+    m.data.0.serialize(serializer)
+}
+fn deserialize_transform<'de, D>(deserializer: D) -> Result<Affine3<f32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let m = <[[f32; 4]; 4]>::deserialize(deserializer)?;
+    let m = nalgebra::Matrix4::from(m);
+    if !nalgebra::geometry::TAffine::check_homogeneous_invariants(&m) {
+        return Err(serde::de::Error::custom("transform not affine"));
+    }
+    Ok(Affine3::from_matrix_unchecked(m))
+}
 #[derive(PartialEq, Debug, Serialize, Deserialize, Clone, Copy)]
 #[serde(tag = "mode")]
 pub enum PositionMode {
@@ -33,7 +52,11 @@ pub enum PositionMode {
     /// the overlay is at a fixed location in space
     Absolute {
         /// transformation matrix for the overlay
-        transform: [[f32; 4]; 4],
+        #[serde(
+            serialize_with = "serialize_transform",
+            deserialize_with = "deserialize_transform"
+        )]
+        transform: Affine3<f32>,
     },
 }
 

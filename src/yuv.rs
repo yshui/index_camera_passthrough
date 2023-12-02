@@ -4,14 +4,11 @@ use std::sync::Arc;
 use vulkano::{
     buffer::{Buffer, BufferCreateInfo, BufferUsage},
     command_buffer::{
-        allocator::StandardCommandBufferAllocator, AutoCommandBufferBuilder,
+        allocator::CommandBufferAllocator, AutoCommandBufferBuilder,
         CommandBufferUsage::OneTimeSubmit, RenderPassBeginInfo, SubpassEndInfo,
     },
     command_buffer::{SubpassBeginInfo, SubpassContents},
-    descriptor_set::{
-        allocator::StandardDescriptorSetAllocator, persistent::PersistentDescriptorSet,
-        WriteDescriptorSet,
-    },
+    descriptor_set::{allocator::DescriptorSetAllocator, DescriptorSet, WriteDescriptorSet},
     device::{Device, DeviceOwned, Queue},
     image::sampler::{Filter, Sampler, SamplerCreateInfo},
     image::view::{ImageView, ImageViewCreateInfo},
@@ -74,7 +71,7 @@ pub struct GpuYuyvConverter {
     device: Arc<Device>,
     render_pass: Arc<RenderPass>,
     pipeline: Arc<GraphicsPipeline>,
-    desc_set: Arc<PersistentDescriptorSet>,
+    desc_set: Arc<DescriptorSet>,
 }
 
 impl std::fmt::Debug for GpuYuyvConverter {
@@ -95,7 +92,7 @@ impl GpuYuyvConverter {
     /// Note the input image's width has to be `w/2`, and `w` has to be even.
     pub fn new(
         device: Arc<Device>,
-        descriptor_set_allocator: &StandardDescriptorSetAllocator,
+        descriptor_set_allocator: Arc<dyn DescriptorSetAllocator>,
         w: u32,
         h: u32,
         input: &Arc<Image>,
@@ -168,8 +165,8 @@ impl GpuYuyvConverter {
                 ..Default::default()
             },
         )?;
-        let desc_set_layout = pipeline.layout().set_layouts().get(0).unwrap();
-        let desc_set = PersistentDescriptorSet::new(
+        let desc_set_layout = pipeline.layout().set_layouts().first().unwrap();
+        let desc_set = DescriptorSet::new(
             descriptor_set_allocator,
             desc_set_layout.clone(),
             [WriteDescriptorSet::image_view_sampler(
@@ -195,7 +192,7 @@ impl GpuYuyvConverter {
     pub fn yuyv_buffer_to_vulkan_image(
         &self,
         allocator: Arc<dyn MemoryAllocator>,
-        cmdbuf_allocator: &StandardCommandBufferAllocator,
+        cmdbuf_allocator: Arc<dyn CommandBufferAllocator>,
         after: impl GpuFuture,
         queue: &Arc<Queue>,
         output: Arc<Image>,

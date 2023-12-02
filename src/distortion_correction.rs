@@ -5,13 +5,11 @@ use std::sync::Arc;
 use vulkano::{
     buffer::{Buffer, BufferCreateInfo, BufferUsage},
     command_buffer::{
-        allocator::StandardCommandBufferAllocator, AutoCommandBufferBuilder,
+        allocator::CommandBufferAllocator, AutoCommandBufferBuilder,
         CommandBufferUsage::OneTimeSubmit, RenderPassBeginInfo, SubpassBeginInfo, SubpassContents,
         SubpassEndInfo,
     },
-    descriptor_set::{
-        allocator::StandardDescriptorSetAllocator, PersistentDescriptorSet, WriteDescriptorSet,
-    },
+    descriptor_set::{allocator::DescriptorSetAllocator, DescriptorSet, WriteDescriptorSet},
     device::{Device, Queue},
     image::{
         sampler::{Filter, Sampler, SamplerCreateInfo},
@@ -56,7 +54,7 @@ pub struct StereoCorrection {
     device: Arc<Device>,
     render_passes: [Arc<RenderPass>; 2],
     pipelines: [Arc<GraphicsPipeline>; 2],
-    desc_sets: [Arc<PersistentDescriptorSet>; 2],
+    desc_sets: [Arc<DescriptorSet>; 2],
     /// field-of-view parameter, 0 = left eye, 1 = right eye
     fov: [[f64; 2]; 2],
 }
@@ -149,7 +147,7 @@ impl StereoCorrection {
     pub fn new(
         device: Arc<Device>,
         allocator: Arc<dyn MemoryAllocator>,
-        descriptor_set_allocator: &StandardDescriptorSetAllocator,
+        descriptor_set_allocator: Arc<dyn DescriptorSetAllocator>,
         input: Arc<Image>,
         camera_calib: &crate::vrapi::StereoCamera,
         is_final: bool,
@@ -300,9 +298,9 @@ impl StereoCorrection {
                 },
                 uniform,
             )?;
-            let desc_set_layout = pipelines[id].layout().set_layouts().get(0).unwrap();
-            Ok::<_, anyhow::Error>(PersistentDescriptorSet::new(
-                descriptor_set_allocator,
+            let desc_set_layout = pipelines[id].layout().set_layouts().first().unwrap();
+            Ok::<_, anyhow::Error>(DescriptorSet::new(
+                descriptor_set_allocator.clone(),
                 desc_set_layout.clone(),
                 [
                     WriteDescriptorSet::buffer(0, uniform),
@@ -329,7 +327,7 @@ impl StereoCorrection {
     }
     pub fn correct(
         &self,
-        cmdbuf_allocator: &StandardCommandBufferAllocator,
+        cmdbuf_allocator: Arc<dyn CommandBufferAllocator>,
         allocator: Arc<dyn MemoryAllocator>,
         after: impl GpuFuture,
         queue: &Arc<Queue>,
@@ -384,11 +382,13 @@ impl StereoCorrection {
         )
         .unwrap();
         for id in 0..2 {
-            let image_view_create_info = ImageViewCreateInfo::from_image(&output);
             let framebuffer = Framebuffer::new(
                 self.render_passes[id].clone(),
                 FramebufferCreateInfo {
-                    attachments: vec![ImageView::new(output.clone(), image_view_create_info)?],
+                    attachments: vec![ImageView::new(
+                        output.clone(),
+                        ImageViewCreateInfo::from_image(&output),
+                    )?],
                     ..Default::default()
                 },
             )?;

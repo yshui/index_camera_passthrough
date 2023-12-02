@@ -20,7 +20,7 @@ pub struct State {
 
 impl State {
     /// Whether the overlay should be visible
-    pub fn visible(&self) -> bool {
+    pub fn is_visible(&self) -> bool {
         self.visible
     }
 

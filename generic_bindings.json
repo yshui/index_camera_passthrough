@@ -1,0 +1,36 @@
+{
+   "action_manifest_version" : 1,
+   "alias_info" : {},
+   "app_key" : "system.generated.index_camera_passthrough",
+   "bindings" : {
+      "/actions/main" : {
+         "sources" : [
+            {
+               "inputs" : {
+                  "click" : {
+                     "output" : "/actions/main/in/button1"
+                  }
+               },
+               "mode" : "button",
+               "path" : "/user/hand/left/input/application_menu"
+            },
+            {
+               "inputs" : {
+                  "click" : {
+                     "output" : "/actions/main/in/button2"
+                  }
+               },
+               "mode" : "button",
+               "path" : "/user/hand/right/input/application_menu"
+            }
+         ]
+      }
+   },
+   "category" : "steamvr_input",
+   "controller_type" : "generic",
+   "description" : "",
+   "interaction_profile" : "",
+   "name" : "Generic index_camera_passthrough configuration",
+   "options" : {},
+   "simulated_actions" : []
+}

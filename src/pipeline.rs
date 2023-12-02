@@ -4,11 +4,10 @@ use anyhow::Result;
 use vulkano::{
     buffer::{Buffer, BufferCreateInfo, BufferUsage},
     command_buffer::{
-        allocator::{CommandBufferAllocator, StandardCommandBufferAllocator},
-        AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferToImageInfo,
-        PrimaryCommandBufferAbstract,
+        allocator::CommandBufferAllocator, AutoCommandBufferBuilder, CommandBufferUsage,
+        CopyBufferToImageInfo, PrimaryCommandBufferAbstract,
     },
-    descriptor_set::allocator::StandardDescriptorSetAllocator,
+    descriptor_set::allocator::DescriptorSetAllocator,
     device::{Device, DeviceOwned},
     format::Format,
     image::{Image as VkImage, ImageCreateInfo, ImageUsage},
@@ -48,7 +47,7 @@ use crate::{config::DisplayMode, CAMERA_SIZE};
 
 pub(crate) fn submit_cpu_image(
     img: &[u8],
-    cmdbuf_allocator: &(impl CommandBufferAllocator + 'static),
+    cmdbuf_allocator: Arc<dyn CommandBufferAllocator>,
     allocator: Arc<dyn MemoryAllocator>,
     queue: &Arc<vulkano::device::Queue>,
     output: Arc<VkImage>,
@@ -206,7 +205,7 @@ impl Pipeline {
     pub(crate) fn new(
         device: Arc<Device>,
         allocator: Arc<dyn MemoryAllocator>,
-        descriptor_set_allocator: &StandardDescriptorSetAllocator,
+        descriptor_set_allocator: Arc<dyn DescriptorSetAllocator>,
         source_is_yuv: bool,
         display_mode: DisplayMode,
         camera_config: Option<crate::vrapi::StereoCamera>,
@@ -253,7 +252,7 @@ impl Pipeline {
             .then(|| {
                 crate::yuv::GpuYuyvConverter::new(
                     device.clone(),
-                    descriptor_set_allocator,
+                    descriptor_set_allocator.clone(),
                     CAMERA_SIZE * 2,
                     CAMERA_SIZE,
                     &yuv_texture,
@@ -308,9 +307,9 @@ impl Pipeline {
         &mut self,
         queue: &Arc<vulkano::device::Queue>,
         allocator: Arc<dyn MemoryAllocator>,
-        cmdbuf_allocator: &StandardCommandBufferAllocator,
+        cmdbuf_allocator: Arc<dyn CommandBufferAllocator>,
         input: &[u8],
-        output: Arc<VkImage>,
+        output: Arc<vulkano::image::Image>,
     ) -> Result<impl GpuFuture> {
         if self.capture {
             if let Some(rd) = self.render_doc.as_mut() {
@@ -322,21 +321,21 @@ impl Pipeline {
         // 1. submit image to GPU
         // 2. convert YUYV to RGB
         let texture = if self.correction.is_some() {
-            &self.textures[0]
+            self.textures[0].clone()
         } else {
-            &output
+            output.clone()
         };
         let future = if let Some(converter) = &self.yuv {
             let future = submit_cpu_image(
                 input,
-                cmdbuf_allocator,
+                cmdbuf_allocator.clone(),
                 allocator.clone(),
                 queue,
                 self.yuv_texture.clone(),
             )?;
             let future = converter.yuyv_buffer_to_vulkan_image(
                 allocator.clone(),
-                cmdbuf_allocator,
+                cmdbuf_allocator.clone(),
                 future,
                 queue,
                 texture.clone(),
@@ -345,7 +344,7 @@ impl Pipeline {
         } else {
             let future = submit_cpu_image(
                 input,
-                cmdbuf_allocator,
+                cmdbuf_allocator.clone(),
                 allocator.clone(),
                 queue,
                 texture.clone(),

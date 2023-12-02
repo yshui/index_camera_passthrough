@@ -1,39 +1,47 @@
 {
-  "default_bindings": [
-   {
-      "controller_type": "knuckles"
-   }
-  ],
-  "actions": [
-    {
-      "name": "/actions/main/in/button1",
-      "requirement": "mandatory",
-      "type": "boolean"
-    },
-    {
-      "name": "/actions/main/in/button2",
-      "type": "boolean",
-      "requirement": "mandatory"
-    },
-    {
-      "name": "/actions/main/in/debug",
-      "type": "boolean"
-    }
-  ],
-  "action_sets": [
-    {
-      "name": "/actions/main",
-      "usage": "leftright"
-    }
-  ],
-  "localization" : [
-   {
-       "language_tag": "en_us",
-
-        "/actions/main" : "Bindings",
-        "/actions/main/in/button1" : "Button 1",
-        "/actions/main/in/button2" : "Button 2",
-        "/actions/main/in/debug" : "Debug"
-    }
-  ]
+   "action_sets" : [
+      {
+         "name" : "/actions/main",
+         "usage" : "leftright"
+      }
+   ],
+   "actions" : [
+      {
+         "name" : "/actions/main/in/button1",
+         "type" : "boolean"
+      },
+      {
+         "name" : "/actions/main/in/button2",
+         "type" : "boolean"
+      },
+      {
+         "name" : "/actions/main/in/debug",
+         "type" : "boolean"
+      }
+   ],
+   "default_bindings" : [
+      {
+         "binding_url" : "vive_controller_bindings.json",
+         "controller_type" : "vive_controller"
+      },
+      {
+         "binding_url" : "knuckles_bindings.json",
+         "controller_type" : "knuckles"
+      },
+      {
+        "binding_url": "generic_bindings.json",
+        "controller_type": "generic"
+      }
+   ],
+   "localization" : [
+      {
+         "/actions/main" : "Bindings",
+         "/actions/main/in/button1" : "Button 1",
+         "/actions/main/in/button2" : "Button 2",
+         "/actions/main/in/debug" : "Debug",
+         "language_tag" : "en_US"
+      }
+   ],
+   "minimum_required_version" : 1,
+   "version" : 1
 }

@@ -16,14 +16,11 @@ use vulkano::{
         AllocateBufferError, Buffer, BufferContents, BufferCreateInfo, BufferUsage, Subbuffer,
     },
     command_buffer::{
-        allocator::StandardCommandBufferAllocator, AutoCommandBufferBuilder,
-        CommandBufferExecError, CommandBufferUsage::OneTimeSubmit, RenderPassBeginInfo,
-        SubpassBeginInfo, SubpassContents, SubpassEndInfo,
+        allocator::CommandBufferAllocator, AutoCommandBufferBuilder, CommandBufferExecError,
+        CommandBufferUsage::OneTimeSubmit, RenderPassBeginInfo, SubpassBeginInfo, SubpassContents,
+        SubpassEndInfo,
     },
-    descriptor_set::{
-        allocator::{DescriptorSetAlloc, DescriptorSetAllocator},
-        PersistentDescriptorSet, WriteDescriptorSet,
-    },
+    descriptor_set::{allocator::DescriptorSetAllocator, DescriptorSet, WriteDescriptorSet},
     device::{Device, Queue},
     image::view::{ImageView, ImageViewCreateInfo},
     image::{
@@ -49,7 +46,7 @@ use vulkano::{
     },
     render_pass::{Framebuffer, RenderPass, Subpass},
     sync::{GpuFuture, HostAccessError},
-    Handle, Validated, VulkanError, VulkanObject,
+    Validated, VulkanError,
 };
 mod vs {
     vulkano_shaders::shader! {
@@ -89,8 +86,9 @@ impl std::fmt::Debug for Uniforms {
     }
 }
 
-pub struct Projection<T> {
-    source: Arc<Image>,
+#[derive(Debug)]
+pub struct Projection {
+    extent: [u32; 2],
     pipeline: Arc<GraphicsPipeline>,
     render_pass: Arc<RenderPass>,
     // [0: left, 1: right]
@@ -98,18 +96,7 @@ pub struct Projection<T> {
     saved_parameters: ProjectionParameters,
     mode_ipd_changed: bool,
     mvps_changed: bool,
-    desc_sets: [Arc<PersistentDescriptorSet<T>>; 2],
-}
-impl<T> std::fmt::Debug for Projection<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Projection")
-            .field("source", &self.source.handle().as_raw())
-            .field("pipeline", &self.pipeline.handle().as_raw())
-            .field("render_pass", &self.render_pass.handle().as_raw())
-            .field("uniforms", &self.uniforms)
-            .field("saved_parameters", &self.saved_parameters)
-            .finish_non_exhaustive()
-    }
+    desc_sets: [Arc<DescriptorSet>; 2],
 }
 use crate::config::ProjectionMode;
 #[derive(VertexTrait, Default, Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -165,7 +152,7 @@ impl From<Box<vulkano::ValidationError>> for ProjectorError {
 }
 
 use nalgebra::{matrix, Matrix4, RawStorage, Scalar};
-impl<DSA: DescriptorSetAlloc + 'static> Projection<DSA> {
+impl Projection {
     /// Calculate the _physical_ camera's MVP, for each eye.
     /// camera_calib = camera calibration data.
     /// fov_left/right = adjusted fovs, in ratio (not in pixels)
@@ -319,10 +306,10 @@ impl<DSA: DescriptorSetAlloc + 'static> Projection<DSA> {
             uniform,
         )
     }
-    pub fn new<DSA2: DescriptorSetAllocator<Alloc = DSA>>(
+    pub fn new(
         device: Arc<Device>,
         allocator: Arc<dyn MemoryAllocator>,
-        descriptor_set_allocator: &DSA2,
+        descriptor_set_allocator: Arc<dyn DescriptorSetAllocator>,
         source: &Arc<Image>,
         overlay_width: f32,
         camera_calib: &Option<crate::vrapi::StereoCamera>,
@@ -412,7 +399,7 @@ impl<DSA: DescriptorSetAlloc + 'static> Projection<DSA> {
             camera_calib: *camera_calib,
             mvps: [Matrix4::identity(), Matrix4::identity()],
         };
-        let layout = pipeline.layout().set_layouts().get(0).unwrap();
+        let layout = pipeline.layout().set_layouts().first().unwrap();
         let sampler = Sampler::new(
             device,
             SamplerCreateInfo {
@@ -422,8 +409,8 @@ impl<DSA: DescriptorSetAlloc + 'static> Projection<DSA> {
             },
         )?;
         let desc_sets = [0, 1].try_map(|i| {
-            PersistentDescriptorSet::new(
-                descriptor_set_allocator,
+            DescriptorSet::new(
+                descriptor_set_allocator.clone(),
                 layout.clone(),
                 [
                     WriteDescriptorSet::buffer(0, transforms[i].clone()),
@@ -438,13 +425,14 @@ impl<DSA: DescriptorSetAlloc + 'static> Projection<DSA> {
             )
             .map_err(ProjectorError::from)
         })?;
+        let source_extent = source.extent();
         Ok(Self {
             saved_parameters: init_params,
             uniforms: Uniforms { transforms },
             desc_sets,
             render_pass,
             pipeline,
-            source: source.clone(),
+            extent: [source_extent[0], source_extent[1]],
             mode_ipd_changed: true,
             mvps_changed: true,
         })
@@ -452,7 +440,7 @@ impl<DSA: DescriptorSetAlloc + 'static> Projection<DSA> {
     pub fn project(
         &mut self,
         allocator: Arc<dyn MemoryAllocator>,
-        cmdbuf_allocator: &StandardCommandBufferAllocator,
+        cmdbuf_allocator: Arc<dyn CommandBufferAllocator>,
         after: impl GpuFuture,
         queue: &Arc<Queue>,
         output: Arc<Image>,
@@ -469,7 +457,7 @@ impl<DSA: DescriptorSetAlloc + 'static> Projection<DSA> {
             },
         )?;
         let ProjectionParameters { overlay_width, .. } = &self.saved_parameters;
-        let [w, h, _] = self.source.extent();
+        let [w, h] = self.extent;
         let mut cmdbuf = AutoCommandBufferBuilder::primary(
             cmdbuf_allocator,
             queue.queue_family_index(),

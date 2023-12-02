@@ -1,10 +1,10 @@
-use ash::vk::ExtSwapchainColorspaceFn;
-use humantime_serde::re;
 use itertools::Itertools;
-use nalgebra::{matrix, Matrix4};
+use nalgebra::{matrix, Affine3, Matrix3, Matrix4, RealField, Translation3, UnitQuaternion};
 use openvr_sys2::{ETrackedPropertyError, EVRInitError, EVRInputError, EVROverlayError};
 use openxr::{
-    ApplicationInfo, EnvironmentBlendMode, EventDataBuffer, OverlaySessionCreateFlagsEXTX,
+    ApplicationInfo, EnvironmentBlendMode, EventDataBuffer, Extent2Di, EyeVisibility, Offset2Di,
+    OverlaySessionCreateFlagsEXTX, Rect2Di, ReferenceSpaceType, SwapchainSubImage,
+    ViewConfigurationType, ViewStateFlags,
 };
 use std::{
     ffi::CString,
@@ -15,16 +15,16 @@ use std::{
 };
 use vulkano::{
     command_buffer::{
-        allocator::StandardCommandBufferAllocator,
+        allocator::{CommandBufferAllocator, StandardCommandBufferAllocator},
         sys::{CommandBufferBeginInfo, UnsafeCommandBufferBuilder},
         CommandBufferLevel, CommandBufferUsage,
     },
     descriptor_set::allocator::{
-        StandardDescriptorSetAlloc, StandardDescriptorSetAllocator,
+        DescriptorSetAllocator, StandardDescriptorSetAllocator,
         StandardDescriptorSetAllocatorCreateInfo,
     },
     device::{physical::PhysicalDevice, Device, Queue, QueueCreateInfo, QueueFlags},
-    image::{ImageAspects, ImageLayout, ImageSubresourceRange},
+    image::{Image, ImageAspects, ImageCreateInfo, ImageLayout, ImageSubresourceRange, ImageUsage},
     instance::Instance,
     memory::allocator::{MemoryAllocator, StandardMemoryAllocator},
     sync::{AccessFlags, DependencyInfo, GpuFuture, ImageMemoryBarrier, PipelineStages},
@@ -35,7 +35,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     config::{DisplayMode, Eye, PositionMode},
-    APP_KEY, APP_NAME,
+    APP_KEY, APP_NAME, CAMERA_SIZE,
 };
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
 pub struct Extrinsics {
@@ -106,8 +106,8 @@ pub(crate) trait VkContext {
     fn vk_device(&self, instance: &Arc<Instance>) -> (Arc<Device>, Arc<Queue>);
     fn vk_instance(&self) -> Arc<Instance>;
     fn vk_allocator(&self) -> Arc<dyn MemoryAllocator>;
-    fn vk_descriptor_set_allocator(&self) -> &StandardDescriptorSetAllocator;
-    fn vk_command_buffer_allocator(&self) -> &StandardCommandBufferAllocator;
+    fn vk_descriptor_set_allocator(&self) -> Arc<dyn DescriptorSetAllocator>;
+    fn vk_command_buffer_allocator(&self) -> Arc<dyn CommandBufferAllocator>;
 }
 
 pub(crate) trait Vr: VkContext {
@@ -145,7 +145,7 @@ pub(crate) trait Vr: VkContext {
     ///
     /// Once this is called, the render texture is considered acquired until it's released by calling `submit_texture`.
     /// Caller should upload camera frames to the render texture, then call `submit_texture`.
-    fn get_render_texture(&mut self) -> Result<Option<Arc<vulkano::image::Image>>, Self::Error>;
+    fn get_render_texture(&mut self) -> Result<Option<Arc<Image>>, Self::Error>;
     fn poll_next_event(&mut self) -> Result<Option<Event>, Self::Error>;
     fn update_action_state(&mut self) -> Result<(), Self::Error>;
     fn get_action_state(&self, action: Action) -> Result<bool, Self::Error>;
@@ -157,7 +157,7 @@ impl<T: VkContext, F> VkContext for VrMapError<T, F> {
     fn vk_allocator(&self) -> Arc<dyn MemoryAllocator> {
         self.0.vk_allocator()
     }
-    fn vk_descriptor_set_allocator(&self) -> &StandardDescriptorSetAllocator {
+    fn vk_descriptor_set_allocator(&self) -> Arc<dyn DescriptorSetAllocator> {
         self.0.vk_descriptor_set_allocator()
     }
     fn vk_device(&self, instance: &Arc<Instance>) -> (Arc<Device>, Arc<Queue>) {
@@ -166,7 +166,7 @@ impl<T: VkContext, F> VkContext for VrMapError<T, F> {
     fn vk_instance(&self) -> Arc<Instance> {
         self.0.vk_instance()
     }
-    fn vk_command_buffer_allocator(&self) -> &StandardCommandBufferAllocator {
+    fn vk_command_buffer_allocator(&self) -> Arc<dyn CommandBufferAllocator> {
         self.0.vk_command_buffer_allocator()
     }
 }
@@ -202,7 +202,7 @@ impl<T: Vr, E: Send + Sync + 'static, F: Fn(<T as Vr>::Error) -> E> Vr for VrMap
     fn set_position_mode(&mut self, mode: PositionMode) -> Result<(), Self::Error> {
         self.0.set_position_mode(mode).map_err(&self.1)
     }
-    fn get_render_texture(&mut self) -> Result<Option<Arc<vulkano::image::Image>>, Self::Error> {
+    fn get_render_texture(&mut self) -> Result<Option<Arc<Image>>, Self::Error> {
         self.0.get_render_texture().map_err(&self.1)
     }
     fn hide_overlay(&mut self) -> Result<(), Self::Error> {
@@ -248,13 +248,13 @@ pub(crate) struct OpenVr {
     position_mode: PositionMode,
     display_mode: DisplayMode,
     overlay_transform: Matrix4<f64>,
-    projector: Option<crate::projection::Projection<StandardDescriptorSetAlloc>>,
+    projector: Option<crate::projection::Projection>,
     device: Arc<Device>,
     queue: Arc<Queue>,
     instance: Arc<Instance>,
     allocator: Arc<StandardMemoryAllocator>,
-    cmdbuf_allocator: StandardCommandBufferAllocator,
-    descriptor_set_allocator: StandardDescriptorSetAllocator,
+    cmdbuf_allocator: Arc<StandardCommandBufferAllocator>,
+    descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
     render_texture: Option<Arc<vulkano::image::Image>>,
     ipd: Option<f32>,
 }
@@ -376,12 +376,14 @@ impl OpenVr {
         let instance = Self::create_vk_instance()?;
         let (device, queue) = Self::create_vk_device(&sys, &instance)?;
         let allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
-        let descriptor_set_allocator = StandardDescriptorSetAllocator::new(
+        let descriptor_set_allocator = Arc::new(StandardDescriptorSetAllocator::new(
             device.clone(),
             StandardDescriptorSetAllocatorCreateInfo::default(),
-        );
-        let cmdbuf_allocator =
-            StandardCommandBufferAllocator::new(device.clone(), Default::default());
+        ));
+        let cmdbuf_allocator = Arc::new(StandardCommandBufferAllocator::new(
+            device.clone(),
+            Default::default(),
+        ));
         Ok(Self {
             sys,
             handle: vroverlay,
@@ -531,11 +533,11 @@ impl VkContext for OpenVr {
     fn vk_allocator(&self) -> Arc<dyn MemoryAllocator> {
         self.allocator.clone()
     }
-    fn vk_descriptor_set_allocator(&self) -> &StandardDescriptorSetAllocator {
-        &self.descriptor_set_allocator
+    fn vk_descriptor_set_allocator(&self) -> Arc<dyn DescriptorSetAllocator> {
+        self.descriptor_set_allocator.clone()
     }
-    fn vk_command_buffer_allocator(&self) -> &StandardCommandBufferAllocator {
-        &self.cmdbuf_allocator
+    fn vk_command_buffer_allocator(&self) -> Arc<dyn CommandBufferAllocator> {
+        self.cmdbuf_allocator.clone()
     }
 }
 
@@ -543,7 +545,7 @@ fn transition_layout(
     input_layout: ImageLayout,
     image: &Arc<vulkano::image::Image>,
     queue: &Arc<Queue>,
-    cmdbuf_allocator: &StandardCommandBufferAllocator,
+    cmdbuf_allocator: Arc<dyn CommandBufferAllocator>,
 ) -> Result<vulkano::sync::fence::Fence, vulkano::Validated<vulkano::VulkanError>> {
     let cmdbuf = unsafe {
         let mut builder = UnsafeCommandBufferBuilder::new(
@@ -632,7 +634,7 @@ impl Vr for OpenVr {
             Some(lhcfg)
         }
     }
-    fn get_render_texture(&mut self) -> Result<Option<Arc<vulkano::image::Image>>, Self::Error> {
+    fn get_render_texture(&mut self) -> Result<Option<Arc<Image>>, Self::Error> {
         // log::debug!("get_render_texture");
         if self.display_mode.projection_mode().is_none() {
             assert!(self.render_texture.is_none());
@@ -667,7 +669,7 @@ impl Vr for OpenVr {
             projector.set_ipd(ipd);
             let future = projector.project(
                 self.allocator.clone(),
-                &self.cmdbuf_allocator,
+                self.cmdbuf_allocator.clone(),
                 vulkano::sync::future::now(self.device.clone()),
                 &self.queue,
                 new_texture.clone(),
@@ -678,7 +680,7 @@ impl Vr for OpenVr {
         } else {
             let output = self.render_texture.take().unwrap();
             if layout != ImageLayout::TransferSrcOptimal {
-                transition_layout(layout, &output, &self.queue, &self.cmdbuf_allocator)?
+                transition_layout(layout, &output, &self.queue, self.cmdbuf_allocator.clone())?
                     .wait(None)?;
             }
             output
@@ -738,7 +740,7 @@ impl Vr for OpenVr {
                 let mut projector = crate::projection::Projection::new(
                     self.device.clone(),
                     self.allocator.clone(),
-                    &self.descriptor_set_allocator,
+                    self.descriptor_set_allocator.clone(),
                     self.render_texture.as_ref().unwrap(),
                     1.0,
                     &camera_calib,
@@ -885,8 +887,8 @@ pub(crate) struct OpenXr {
     position_mode: PositionMode,
     display_mode: DisplayMode,
     allocator: Arc<StandardMemoryAllocator>,
-    descriptor_set_allocator: StandardDescriptorSetAllocator,
-    cmdbuf_allocator: StandardCommandBufferAllocator,
+    descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
+    cmdbuf_allocator: Arc<StandardCommandBufferAllocator>,
     action_set: openxr::ActionSet,
     action_button1: openxr::Action<bool>,
     action_button2: openxr::Action<bool>,
@@ -897,10 +899,51 @@ pub(crate) struct OpenXr {
     frame_waiter: openxr::FrameWaiter,
     frame_stream: openxr::FrameStream<openxr::Vulkan>,
     swapchain: openxr::Swapchain<openxr::Vulkan>,
+    swapchain_images: Vec<Arc<Image>>,
+    frame_state: Option<openxr::FrameState>,
+    space: openxr::Space,
+    saved_pose: Matrix4<f32>,
 
     device: Arc<Device>,
     queue: Arc<Queue>,
     vk_instance: Arc<Instance>,
+
+    projector: Option<crate::projection::Projection>,
+    render_texture: Option<Arc<Image>>,
+}
+fn affine_to_posef(t: Affine3<f32>) -> openxr::Posef {
+    let m = t.to_homogeneous();
+    let r: Matrix3<f32> = m.fixed_columns::<3>(0).fixed_rows::<3>(0).into();
+    let rotation = nalgebra::geometry::Rotation3::from_matrix(&r);
+    let quaternion = UnitQuaternion::from_rotation_matrix(&rotation);
+    let quaternion = &quaternion.as_ref().coords;
+    let translation: nalgebra::Vector3<f32> =
+        [m.data.0[3][0], m.data.0[3][1], m.data.0[3][2]].into();
+    openxr::Posef {
+        orientation: openxr::Quaternionf {
+            x: quaternion.x,
+            y: quaternion.y,
+            z: quaternion.z,
+            w: quaternion.w,
+        },
+        position: openxr::Vector3f {
+            x: translation.x,
+            y: translation.y,
+            z: translation.z,
+        },
+    }
+}
+
+fn posef_to_nalgebra(posef: openxr::Posef) -> (UnitQuaternion<f32>, nalgebra::Vector3<f32>) {
+    let quaternion = UnitQuaternion::new_normalize(nalgebra::Quaternion::new(
+        posef.orientation.x,
+        posef.orientation.y,
+        posef.orientation.z,
+        posef.orientation.w,
+    ));
+    let translation: nalgebra::Vector3<f32> =
+        [posef.position.x, posef.position.y, posef.position.z].into();
+    (quaternion, translation)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -911,6 +954,10 @@ pub(crate) enum OpenXrError {
     VkLoad(#[from] vulkano::LoadingError),
     #[error("vulkan error: {0}")]
     Vk(#[from] vulkano::VulkanError),
+    #[error("vulkan error: {0}")]
+    ValidatedVk(#[from] vulkano::Validated<vulkano::VulkanError>),
+    #[error("cannot allocate image: {0}")]
+    AlocateImage(#[from] vulkano::Validated<vulkano::image::AllocateImageError>),
     #[error("xr: {0}")]
     Xr(#[from] openxr::sys::Result),
     #[error("vulkan error: {0}")]
@@ -919,6 +966,21 @@ pub(crate) enum OpenXrError {
     NoGraphicsQueue,
     #[error("no usable texture format")]
     NoFormat,
+    #[error("{0}")]
+    Projection(#[from] crate::projection::ProjectorError),
+    #[error("cannot allocate device memory: {0}")]
+    Allocator(#[from] vulkano::memory::allocator::MemoryAllocatorError),
+    #[error("vulkan version doesn't meet requirements: {0}")]
+    VersionNotSupported(vulkano::Version),
+}
+
+impl Drop for OpenXr {
+    fn drop(&mut self) {
+        for image in self.swapchain_images.drain(..) {
+            log::info!("destroying image {:#x}", image.handle().as_raw());
+            let _ = Arc::try_unwrap(image).unwrap().into_raw().into_handle();
+        }
+    }
 }
 
 impl OpenXr {
@@ -927,6 +989,7 @@ impl OpenXr {
         xr_system: openxr::SystemId,
         instance: &Arc<Instance>,
     ) -> Result<(Arc<Device>, Arc<Queue>), OpenXrError> {
+        let vk_requirements = xr_instance.graphics_requirements::<openxr::Vulkan>(xr_system)?;
         let physical_device = unsafe {
             let physical_device =
                 xr_instance.vulkan_graphics_device(xr_system, instance.handle().as_raw() as _)?;
@@ -935,19 +998,31 @@ impl OpenXr {
                 ash::vk::PhysicalDevice::from_raw(physical_device as _),
             )
         }?;
+        let min_version = vulkano::Version::major_minor(
+            vk_requirements.min_api_version_supported.major() as u32,
+            vk_requirements.min_api_version_supported.minor() as u32,
+        );
+        if physical_device.api_version() < min_version {
+            return Err(OpenXrError::VersionNotSupported(
+                physical_device.api_version(),
+            ));
+        }
         let queue_family = physical_device
             .queue_family_properties()
             .iter()
             .position(|qf| qf.queue_flags.contains(QueueFlags::GRAPHICS))
             .ok_or(OpenXrError::NoGraphicsQueue)?;
+        log::debug!("queue family: {queue_family}");
         let create_info = ash::vk::DeviceCreateInfo::builder()
             .queue_create_infos(&[ash::vk::DeviceQueueCreateInfo::builder()
                 .queue_family_index(queue_family as u32)
+                .queue_priorities(&[1.0])
                 .build()])
             .build();
         let vulkano_create_info = vulkano::device::DeviceCreateInfo {
             queue_create_infos: vec![QueueCreateInfo {
                 queue_family_index: queue_family as u32,
+                queues: vec![1.0],
                 ..Default::default()
             }],
             physical_devices: [physical_device.clone()].into_iter().collect(),
@@ -976,9 +1051,14 @@ impl OpenXr {
         xr_instance: &openxr::Instance,
         xr_system: openxr::SystemId,
     ) -> Result<Arc<Instance>, OpenXrError> {
+        let vk_requirements = xr_instance.graphics_requirements::<openxr::Vulkan>(xr_system)?;
         let extensions = *get_vulkan_library().supported_extensions();
+        let max_version = vulkano::Version::major_minor(
+            vk_requirements.max_api_version_supported.major() as u32,
+            vk_requirements.max_api_version_supported.minor() as u32,
+        );
         let vulkano_create_info = vulkano::instance::InstanceCreateInfo {
-            max_api_version: Some(vulkano::Version::V1_6),
+            max_api_version: Some(max_version),
             enabled_extensions: extensions,
             // enabled_layers: vec!["VK_LAYER_KHRONOS_validation".to_owned()],
             ..Default::default()
@@ -997,6 +1077,7 @@ impl OpenXr {
         let create_info = ash::vk::InstanceCreateInfo::builder()
             .enabled_extension_names(&extensions)
             .application_info(&application_info)
+            .enabled_layer_names(&[b"VK_LAYER_KHRONOS_validation\0".as_ptr() as _])
             .build();
         let instance = unsafe {
             xr_instance.create_vulkan_instance(
@@ -1016,6 +1097,7 @@ impl OpenXr {
         let mut extension = openxr::ExtensionSet::default();
         extension.extx_overlay = true;
         extension.khr_vulkan_enable2 = true;
+        extension.khr_convert_timespec_time = true;
         let instance = entry.create_instance(
             &ApplicationInfo {
                 application_name: crate::APP_NAME,
@@ -1030,12 +1112,14 @@ impl OpenXr {
         let vk_instance = Self::create_vk_instance(&instance, system)?;
         let (device, queue) = Self::create_vk_device(&instance, system, &vk_instance)?;
         let allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
-        let cmdbuf_allocator =
-            StandardCommandBufferAllocator::new(device.clone(), Default::default());
-        let descriptor_set_allocator = StandardDescriptorSetAllocator::new(
+        let cmdbuf_allocator = Arc::new(StandardCommandBufferAllocator::new(
+            device.clone(),
+            Default::default(),
+        ));
+        let descriptor_set_allocator = Arc::new(StandardDescriptorSetAllocator::new(
             device.clone(),
             StandardDescriptorSetAllocatorCreateInfo::default(),
-        );
+        ));
 
         let action_set = instance.create_action_set("main", "main", 0)?;
         let overlay = openxr::sys::SessionCreateInfoOverlayEXTX {
@@ -1078,13 +1162,46 @@ impl OpenXr {
             array_size: 1,
             face_count: 1,
             create_flags: Default::default(),
-            usage_flags: openxr::SwapchainUsageFlags::COLOR_ATTACHMENT,
+            usage_flags: openxr::SwapchainUsageFlags::COLOR_ATTACHMENT
+                | openxr::SwapchainUsageFlags::TRANSFER_DST,
             format: vulkano::format::Format::R8G8B8A8_UNORM as u32,
             sample_count: 1,
             width: crate::CAMERA_SIZE * 2,
             height: crate::CAMERA_SIZE,
             mip_count: 1,
         })?;
+        log::debug!("created swapchain");
+        let swapchain_images = swapchain
+            .enumerate_images()?
+            .into_iter()
+            .map(|handle| {
+                let handle = ash::vk::Image::from_raw(handle);
+                let raw_image = unsafe {
+                    vulkano::image::sys::RawImage::from_handle(
+                        device.clone(),
+                        handle,
+                        ImageCreateInfo {
+                            format: vulkano::format::Format::R8G8B8A8_UNORM,
+                            extent: [CAMERA_SIZE * 2, CAMERA_SIZE, 1],
+                            usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_DST,
+                            ..Default::default()
+                        },
+                    )?
+                };
+                // SAFETY: OpenXR guarantees that the image is a swapchain image, thus has memory backing it.
+                let image = unsafe { raw_image.assume_bound() };
+                Ok::<_, OpenXrError>(Arc::new(image))
+            })
+            .try_collect()?;
+        log::debug!("got swapchain images");
+        let action_button1 = action_set.create_action("button1", "Button1", &[])?;
+        let action_button2 = action_set.create_action("button2", "Button2", &[])?;
+        let action_debug = action_set.create_action("debug", "Debug", &[])?;
+        let space =
+            session.create_reference_space(ReferenceSpaceType::STAGE, openxr::Posef::IDENTITY)?;
+        log::debug!("created actions");
+        session.attach_action_sets(&[&action_set])?;
+
         Ok(Self {
             entry,
             instance,
@@ -1093,9 +1210,10 @@ impl OpenXr {
             overlay_transform: Matrix4::identity(),
             position_mode: PositionMode::default(),
             display_mode: DisplayMode::default(),
-            action_button1: action_set.create_action("button1", "Button1", &[])?,
-            action_button2: action_set.create_action("button2", "Button2", &[])?,
-            action_debug: action_set.create_action("debug", "Debug", &[])?,
+            action_button1,
+            action_button2,
+            action_debug,
+
             action_set,
 
             session_state: openxr::SessionState::IDLE,
@@ -1103,6 +1221,10 @@ impl OpenXr {
             frame_waiter,
             frame_stream,
             swapchain,
+            swapchain_images,
+            frame_state: None,
+            space,
+            saved_pose: Matrix4::identity(),
 
             allocator,
             descriptor_set_allocator,
@@ -1110,6 +1232,9 @@ impl OpenXr {
             vk_instance,
             device,
             queue,
+
+            projector: None,
+            render_texture: None,
         })
     }
 }
@@ -1133,11 +1258,11 @@ impl VkContext for OpenXr {
     fn vk_allocator(&self) -> Arc<dyn MemoryAllocator> {
         self.allocator.clone()
     }
-    fn vk_descriptor_set_allocator(&self) -> &StandardDescriptorSetAllocator {
-        &self.descriptor_set_allocator
+    fn vk_descriptor_set_allocator(&self) -> Arc<dyn DescriptorSetAllocator> {
+        self.descriptor_set_allocator.clone()
     }
-    fn vk_command_buffer_allocator(&self) -> &StandardCommandBufferAllocator {
-        &self.cmdbuf_allocator
+    fn vk_command_buffer_allocator(&self) -> Arc<dyn CommandBufferAllocator> {
+        self.cmdbuf_allocator.clone()
     }
 }
 
@@ -1149,7 +1274,7 @@ impl Vr for OpenXr {
     type Error = OpenXrError;
 
     fn load_camera_paramter(&mut self) -> Option<StereoCamera> {
-        None
+        crate::steam::find_steam_config()
     }
 
     fn submit_texture(
@@ -1158,7 +1283,82 @@ impl Vr for OpenXr {
         elapsed: Duration,
         fov: &[[f64; 2]; 2],
     ) -> Result<(), Self::Error> {
-        todo!()
+        let frame_state = self.frame_state.as_ref().unwrap();
+        let now = self.instance.now()?;
+        let time_at_capture =
+            openxr::Time::from_nanos((now.as_nanos() as u128 - elapsed.as_nanos()) as i64);
+        self.swapchain.release_image()?;
+        let posef = match self.position_mode {
+            PositionMode::Hmd { distance } => {
+                let (view_state_flags, views) = self.session.locate_views(
+                    ViewConfigurationType::PRIMARY_STEREO,
+                    time_at_capture,
+                    &self.space,
+                )?;
+                let transform = if !view_state_flags.contains(ViewStateFlags::ORIENTATION_VALID)
+                    || !view_state_flags.contains(ViewStateFlags::POSITION_VALID)
+                {
+                    self.saved_pose
+                } else {
+                    let poses = [1, 2].map(|id| posef_to_nalgebra(views[id].pose));
+                    let rotation_center = UnitQuaternion::from_quaternion(
+                        (poses[0].0.as_ref() + poses[1].0.as_ref()) / 2.0,
+                    );
+                    let center: Translation3<f32> = ((poses[0].1 + poses[1].1) / 2.0).into();
+                    let transform = center.to_homogeneous()
+                        * rotation_center.to_homogeneous()
+                        * matrix![
+                            1.0, 0.0, 0.0, 0.0;
+                            0.0, 1.0, 0.0, 0.0;
+                            0.0, 0.0, 1.0, -distance;
+                            0.0, 0.0, 0.0, 1.0;
+                        ];
+                    self.saved_pose = transform;
+                    transform
+                };
+                affine_to_posef(Affine3::from_matrix_unchecked(transform))
+            }
+            PositionMode::Absolute { transform } => affine_to_posef(transform),
+        };
+        let left = openxr::CompositionLayerQuad::<openxr::Vulkan>::new()
+            .eye_visibility(EyeVisibility::LEFT)
+            .pose(posef)
+            .sub_image(
+                SwapchainSubImage::new()
+                    .swapchain(&self.swapchain)
+                    .image_rect(Rect2Di {
+                        offset: Offset2Di { x: 0, y: 0 },
+                        extent: Extent2Di {
+                            width: crate::CAMERA_SIZE as i32,
+                            height: crate::CAMERA_SIZE as i32,
+                        },
+                    }),
+            )
+            .space(&self.space);
+        let right = openxr::CompositionLayerQuad::<openxr::Vulkan>::new()
+            .eye_visibility(EyeVisibility::RIGHT)
+            .pose(posef)
+            .sub_image(
+                SwapchainSubImage::new()
+                    .swapchain(&self.swapchain)
+                    .image_rect(Rect2Di {
+                        offset: Offset2Di {
+                            x: crate::CAMERA_SIZE as i32,
+                            y: 0,
+                        },
+                        extent: Extent2Di {
+                            width: crate::CAMERA_SIZE as i32,
+                            height: crate::CAMERA_SIZE as i32,
+                        },
+                    }),
+            )
+            .space(&self.space);
+        self.frame_stream.end(
+            frame_state.predicted_display_time,
+            EnvironmentBlendMode::ALPHA_BLEND,
+            &[&left, &right],
+        )?;
+        Ok(())
     }
 
     fn is_synchronized(&self) -> bool {
@@ -1166,13 +1366,33 @@ impl Vr for OpenXr {
     }
 
     fn refresh(&mut self) -> Result<(), Self::Error> {
-        todo!()
+        if self.session_state != openxr::SessionState::SYNCHRONIZED
+            && self.session_state != openxr::SessionState::FOCUSED
+            && self.session_state != openxr::SessionState::VISIBLE
+        {
+            return Ok(());
+        }
+        let frame_state = self.frame_state.insert(self.frame_waiter.wait()?);
+        self.frame_stream.begin()?;
+        // TODO
+        self.frame_stream.end(
+            frame_state.predicted_display_time,
+            EnvironmentBlendMode::ALPHA_BLEND,
+            &[],
+        )?;
+        Ok(())
     }
 
-    fn get_render_texture(&mut self) -> Result<Option<Arc<vulkano::image::Image>>, Self::Error> {
-        let frame_state = self.frame_waiter.wait()?;
+    fn get_render_texture(&mut self) -> Result<Option<Arc<Image>>, Self::Error> {
+        if self.session_state != openxr::SessionState::SYNCHRONIZED
+            && self.session_state != openxr::SessionState::FOCUSED
+            && self.session_state != openxr::SessionState::VISIBLE
+        {
+            return Ok(None);
+        }
+        let frame_state = self.frame_state.insert(self.frame_waiter.wait()?);
+        self.frame_stream.begin()?;
         if !frame_state.should_render {
-            self.frame_stream.begin()?;
             self.frame_stream.end(
                 frame_state.predicted_display_time,
                 EnvironmentBlendMode::ALPHA_BLEND,
@@ -1180,11 +1400,38 @@ impl Vr for OpenXr {
             )?;
             return Ok(None);
         }
-        todo!()
+        if self.display_mode.projection_mode().is_some() {
+            assert!(self.render_texture.is_some());
+            return Ok(self.render_texture.clone());
+        }
+        let image = self.swapchain.acquire_image()? as usize;
+        self.render_texture = Some(self.swapchain_images[image].clone());
+        self.swapchain.wait_image(openxr::Duration::INFINITE)?;
+        Ok(self.render_texture.clone())
     }
 
     fn set_display_mode(&mut self, mode: DisplayMode) -> Result<(), Self::Error> {
         self.display_mode = mode;
+        if let Some(projection_mode) = self.display_mode.projection_mode() {
+            let camera_calib = self.load_camera_paramter();
+            if self.projector.is_none() {
+                self.render_texture =
+                    Some(crate::create_submittable_image(self.allocator.clone())?);
+                let mut projector = crate::projection::Projection::new(
+                    self.device.clone(),
+                    self.allocator.clone(),
+                    self.descriptor_set_allocator.clone(),
+                    self.render_texture.as_ref().unwrap(),
+                    1.0,
+                    &camera_calib,
+                )?;
+                projector.set_mode(projection_mode);
+                self.projector = Some(projector);
+            }
+        } else {
+            self.render_texture = None;
+            self.projector = None;
+        }
         Ok(())
     }
 
@@ -1226,7 +1473,7 @@ impl Vr for OpenXr {
                     self.session_state = ssc.state();
                     match self.session_state {
                         SessionState::EXITING | SessionState::LOSS_PENDING => {
-                            self.session.end();
+                            self.session.end()?;
                             break Some(Event::RequestExit);
                         }
                         SessionState::READY => {

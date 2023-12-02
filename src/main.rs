@@ -17,7 +17,7 @@ mod steam;
 mod vrapi;
 mod yuv;
 
-use std::sync::{atomic::AtomicBool, Arc, Mutex};
+use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Context, Result};
 
@@ -59,8 +59,33 @@ fn find_index_camera() -> Result<std::path::PathBuf> {
 static SPLASH_IMAGE: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/splash.png"));
 
 fn first_run(xdg: &BaseDirectories) -> Result<()> {
-    const STEAMVR_ACTION_MANIFEST: &str =
-        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/actions.json"));
+    const DATA_FILES: &[(&str, &str)] = &[
+        (
+            "actions.json",
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/actions.json")),
+        ),
+        (
+            "vive_controller_bindings.json",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/vive_controller_bindings.json"
+            )),
+        ),
+        (
+            "knuckles_bindings.json",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/knuckles_bindings.json"
+            )),
+        ),
+        (
+            "generic_bindings.json",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/generic_bindings.json"
+            )),
+        ),
+    ];
     const DEFAULT_CONFIG: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/index_camera_passthrough.toml"
@@ -69,9 +94,11 @@ fn first_run(xdg: &BaseDirectories) -> Result<()> {
     if !config.exists() {
         std::fs::write(&config, DEFAULT_CONFIG)?;
     }
-    let action_manifest = xdg.place_data_file("actions.json")?;
-    if !action_manifest.exists() {
-        std::fs::write(&action_manifest, STEAMVR_ACTION_MANIFEST)?;
+    for (name, data) in DATA_FILES {
+        let path = xdg.place_data_file(name)?;
+        if !path.exists() {
+            std::fs::write(&path, data)?;
+        }
     }
     Ok(())
 }
@@ -114,11 +141,60 @@ fn load_splash() -> Result<Vec<u8>> {
     Ok(img)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+enum State {
+    Running,
+    Capturing,
+    Stopping,
+}
+
+struct AppState {
+    state: Mutex<State>,
+    notify: std::sync::Condvar,
+}
+
+impl AppState {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(State::Running),
+            notify: std::sync::Condvar::new(),
+        }
+    }
+    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
+        self.state.lock().unwrap()
+    }
+    fn wait_while<'a, F>(
+        &'a self,
+        guard: std::sync::MutexGuard<'a, State>,
+        f: F,
+    ) -> std::sync::MutexGuard<'a, State>
+    where
+        F: FnMut(&mut State) -> bool,
+    {
+        self.notify.wait_while(guard, f).unwrap()
+    }
+    fn stop(&self) {
+        *self.state.lock().unwrap() = State::Stopping;
+        self.notify.notify_all();
+    }
+    fn start_capture(&self) {
+        let mut state = self.state.lock().unwrap();
+        if *state != State::Stopping {
+            *state = State::Capturing;
+        }
+        self.notify.notify_all();
+    }
+    fn stop_capture(&self) {
+        let mut state = self.state.lock().unwrap();
+        if *state != State::Stopping {
+            *state = State::Running;
+        }
+    }
+}
+
 struct CameraThread {
     notify_new_frame: Arc<std::sync::Condvar>,
-    running: Arc<AtomicBool>,
-    capture: Arc<Mutex<bool>>,
-    capture_notify: Arc<std::sync::Condvar>,
+    state: Arc<AppState>,
     frame: Arc<Mutex<Option<FrameInfo>>>,
     camera: v4l::Device,
 }
@@ -127,9 +203,7 @@ impl CameraThread {
     fn run(self) -> Result<()> {
         let Self {
             notify_new_frame,
-            running,
-            capture,
-            capture_notify,
+            state,
             frame,
             camera,
         } = self;
@@ -138,10 +212,12 @@ impl CameraThread {
         // We want to make the latency as low as possible, so only set a single buffer.
         let mut video_stream =
             v4l::prelude::MmapStream::with_buffers(&camera, v4l::buffer::Type::VideoCapture, 1)?;
-        while running.load(std::sync::atomic::Ordering::Relaxed) {
+        loop {
             {
-                let capture = capture.lock().unwrap();
-                drop(capture_notify.wait_while(capture, |&mut c| !c).unwrap());
+                let guard = state.lock();
+                if *state.wait_while(guard, |state| *state == State::Running) == State::Stopping {
+                    break;
+                }
             }
             let (frame_data, metadata) = v4l::io::traits::CaptureStream::next(&mut video_stream)?;
             let frame_time = if let Some((camera_reference, reference)) = first_frame_time {
@@ -208,23 +284,19 @@ fn main() -> Result<()> {
         bypass_pipeline: true,
     })));
 
-    let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let r = running.clone();
+    let app_state = Arc::new(AppState::new());
+    let state2 = app_state.clone();
 
     ctrlc::set_handler(move || {
-        r.store(false, std::sync::atomic::Ordering::Relaxed);
+        state2.stop();
     })
     .expect("Error setting Ctrl-C handler");
 
-    let capture = Arc::new(Mutex::new(false));
-    let capture_notify = Arc::new(std::sync::Condvar::new());
     let notify_new_frame = Arc::new(std::sync::Condvar::new());
     let camera_thread = CameraThread {
         notify_new_frame: notify_new_frame.clone(),
-        running: running.clone(),
-        capture: capture.clone(),
-        capture_notify: capture_notify.clone(),
         frame: frame.clone(),
+        state: app_state.clone(),
         camera,
     };
     let camera_thread = std::thread::spawn(move || camera_thread.run());
@@ -251,8 +323,7 @@ fn main() -> Result<()> {
     // Show overlay
     log::debug!("showing overlay");
     vrsys.show_overlay()?;
-    *capture.lock().unwrap() = true;
-    capture_notify.notify_all();
+    app_state.start_capture();
 
     // TODO: don't hardcode this
     struct AppConfig {
@@ -273,15 +344,15 @@ fn main() -> Result<()> {
 
     log::debug!("pipeline: {pipeline:?}");
 
-    let mut state = events::State::new(cfg.open_delay);
+    let mut ui_state = events::State::new(cfg.open_delay);
     let mut debug_pressed = false;
     let mut maybe_current_frame: Option<FrameInfo> = None;
     let mut frame_changed = false;
     let is_synchronized = vrsys.is_synchronized();
-    'main_loop: loop {
+    loop {
         // If synchronized, get the new frame if available, and refresh with existing frame if not;
         // otherwise wait for the next frame.
-        if state.visible() {
+        if ui_state.is_visible() {
             let mut other_frame = frame.lock().unwrap();
             while !frame_changed {
                 let new_frame_elapsed = other_frame.as_ref().map(|new_frame| new_frame.frame_time);
@@ -361,11 +432,9 @@ fn main() -> Result<()> {
             // Not synchronized, and we didn't wait for new camera frame because we are not visible.
             // We have to throttle our main loop.
             std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-
-        // Handle Ctrl-C
-        if !running.load(std::sync::atomic::Ordering::Relaxed) {
-            break;
+        } else {
+            // Synchronize with VR Runtime.
+            vrsys.refresh()?;
         }
 
         // Handle OpenVR events
@@ -374,10 +443,15 @@ fn main() -> Result<()> {
             match event {
                 vrapi::Event::RequestExit => {
                     log::info!("RequestExit");
+                    app_state.stop();
                     vrsys.acknowledge_quit();
-                    break 'main_loop;
                 }
             }
+        }
+
+        if *app_state.lock() == State::Stopping {
+            // Ctrl-C or request exit
+            break;
         }
 
         // Handle user inputs
@@ -391,8 +465,8 @@ fn main() -> Result<()> {
         } else {
             debug_pressed = false;
         }
-        state.handle(&*vrsys)?;
-        match state.turn() {
+        ui_state.handle(&*vrsys)?;
+        match ui_state.turn() {
             events::Action::ShowOverlay => {
                 vrsys.show_overlay()?;
                 {
@@ -403,21 +477,16 @@ fn main() -> Result<()> {
                         bypass_pipeline: true,
                     });
                 }
-                *capture.lock().unwrap() = true;
-                capture_notify.notify_all();
+                app_state.start_capture();
             }
             events::Action::HideOverlay => {
                 vrsys.hide_overlay()?;
                 maybe_current_frame = None;
-                *capture.lock().unwrap() = false;
+                app_state.stop_capture();
             }
             _ => (),
         }
     }
-    running.store(false, std::sync::atomic::Ordering::Relaxed);
-    // Wake up the camera thread
-    *capture.lock().unwrap() = true;
-    capture_notify.notify_all();
     camera_thread.join().unwrap()?;
     Ok(())
 }
