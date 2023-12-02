@@ -2,8 +2,8 @@ use itertools::Itertools;
 use nalgebra::{matrix, Affine3, Matrix3, Matrix4, RealField, Translation3, UnitQuaternion};
 use openvr_sys2::{ETrackedPropertyError, EVRInitError, EVRInputError, EVROverlayError};
 use openxr::{
-    ApplicationInfo, EnvironmentBlendMode, EventDataBuffer, Extent2Di, EyeVisibility, Offset2Di,
-    OverlaySessionCreateFlagsEXTX, Rect2Di, ReferenceSpaceType, SwapchainSubImage,
+    ApplicationInfo, EnvironmentBlendMode, EventDataBuffer, Extent2Df, Extent2Di, EyeVisibility,
+    Offset2Di, OverlaySessionCreateFlagsEXTX, Rect2Di, ReferenceSpaceType, SwapchainSubImage,
     ViewConfigurationType, ViewStateFlags,
 };
 use std::{
@@ -972,6 +972,8 @@ pub(crate) enum OpenXrError {
     Allocator(#[from] vulkano::memory::allocator::MemoryAllocatorError),
     #[error("vulkan version doesn't meet requirements: {0}")]
     VersionNotSupported(vulkano::Version),
+    #[error("no supported blend mode")]
+    NoSupportedBlendMode,
 }
 
 impl Drop for OpenXr {
@@ -1106,9 +1108,17 @@ impl OpenXr {
                 engine_version: 0,
             },
             &extension,
+            // &["XR_APILAYER_LUNARG_core_validation"],
             &[],
         )?;
         let system = instance.system(openxr::FormFactor::HEAD_MOUNTED_DISPLAY)?;
+        let blend_modes = instance.enumerate_environment_blend_modes(
+            system,
+            openxr::ViewConfigurationType::PRIMARY_STEREO,
+        )?;
+        if !blend_modes.contains(&openxr::EnvironmentBlendMode::OPAQUE) {
+            return Err(OpenXrError::NoSupportedBlendMode);
+        }
         let vk_instance = Self::create_vk_instance(&instance, system)?;
         let (device, queue) = Self::create_vk_device(&instance, system, &vk_instance)?;
         let allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
@@ -1334,7 +1344,11 @@ impl Vr for OpenXr {
                         },
                     }),
             )
-            .space(&self.space);
+            .space(&self.space)
+            .size(Extent2Df {
+                width: 1.0,
+                height: 1.0,
+            });
         let right = openxr::CompositionLayerQuad::<openxr::Vulkan>::new()
             .eye_visibility(EyeVisibility::RIGHT)
             .pose(posef)
@@ -1352,10 +1366,14 @@ impl Vr for OpenXr {
                         },
                     }),
             )
-            .space(&self.space);
+            .space(&self.space)
+            .size(Extent2Df {
+                width: 1.0,
+                height: 1.0,
+            });
         self.frame_stream.end(
             frame_state.predicted_display_time,
-            EnvironmentBlendMode::ALPHA_BLEND,
+            EnvironmentBlendMode::OPAQUE,
             &[&left, &right],
         )?;
         Ok(())
@@ -1369,6 +1387,7 @@ impl Vr for OpenXr {
         if self.session_state != openxr::SessionState::SYNCHRONIZED
             && self.session_state != openxr::SessionState::FOCUSED
             && self.session_state != openxr::SessionState::VISIBLE
+            && self.session_state != openxr::SessionState::READY
         {
             return Ok(());
         }
@@ -1377,7 +1396,7 @@ impl Vr for OpenXr {
         // TODO
         self.frame_stream.end(
             frame_state.predicted_display_time,
-            EnvironmentBlendMode::ALPHA_BLEND,
+            EnvironmentBlendMode::OPAQUE,
             &[],
         )?;
         Ok(())
@@ -1387,6 +1406,7 @@ impl Vr for OpenXr {
         if self.session_state != openxr::SessionState::SYNCHRONIZED
             && self.session_state != openxr::SessionState::FOCUSED
             && self.session_state != openxr::SessionState::VISIBLE
+            && self.session_state != openxr::SessionState::READY
         {
             return Ok(None);
         }
@@ -1395,7 +1415,7 @@ impl Vr for OpenXr {
         if !frame_state.should_render {
             self.frame_stream.end(
                 frame_state.predicted_display_time,
-                EnvironmentBlendMode::ALPHA_BLEND,
+                EnvironmentBlendMode::OPAQUE,
                 &[],
             )?;
             return Ok(None);
