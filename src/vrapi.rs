@@ -936,10 +936,10 @@ fn affine_to_posef(t: Affine3<f32>) -> openxr::Posef {
 
 fn posef_to_nalgebra(posef: openxr::Posef) -> (UnitQuaternion<f32>, nalgebra::Vector3<f32>) {
     let quaternion = UnitQuaternion::new_normalize(nalgebra::Quaternion::new(
+        posef.orientation.w,
         posef.orientation.x,
         posef.orientation.y,
         posef.orientation.z,
-        posef.orientation.w,
     ));
     let translation: nalgebra::Vector3<f32> =
         [posef.position.x, posef.position.y, posef.position.z].into();
@@ -1099,7 +1099,6 @@ impl OpenXr {
                 engine_version: 0,
             },
             &extension,
-            // &["XR_APILAYER_LUNARG_core_validation"],
             &[],
         )?;
         let system = instance.system(openxr::FormFactor::HEAD_MOUNTED_DISPLAY)?;
@@ -1284,6 +1283,7 @@ impl Vr for OpenXr {
         elapsed: Duration,
         fov: &[[f64; 2]; 2],
     ) -> Result<(), Self::Error> {
+        log::trace!("submit texture");
         let frame_state = self.frame_state.as_ref().unwrap();
         let now = self.instance.now()?;
         let time_at_capture =
@@ -1382,9 +1382,9 @@ impl Vr for OpenXr {
         {
             return Ok(());
         }
+        log::trace!("refresh");
         let frame_state = self.frame_state.insert(self.frame_waiter.wait()?);
         self.frame_stream.begin()?;
-        // TODO
         self.frame_stream.end(
             frame_state.predicted_display_time,
             EnvironmentBlendMode::OPAQUE,
@@ -1481,6 +1481,11 @@ impl Vr for OpenXr {
                 XrEvent::InstanceLossPending(_) => break Some(Event::RequestExit),
                 XrEvent::SessionStateChanged(ssc) => {
                     use openxr::SessionState;
+                    log::debug!(
+                        "session state changed: {:?}, visible: {}",
+                        ssc.state(),
+                        self.overlay_visible
+                    );
                     self.session_state = ssc.state();
                     match self.session_state {
                         SessionState::EXITING | SessionState::LOSS_PENDING => {

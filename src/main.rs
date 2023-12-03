@@ -215,10 +215,12 @@ impl CameraThread {
         loop {
             {
                 let guard = state.lock();
+                log::trace!("state: {:?}", *guard);
                 if *state.wait_while(guard, |state| *state == State::Running) == State::Stopping {
                     break;
                 }
             }
+            log::trace!("getting camera frame");
             let (frame_data, metadata) = v4l::io::traits::CaptureStream::next(&mut video_stream)?;
             let frame_time = if let Some((camera_reference, reference)) = first_frame_time {
                 let camera_elapsed =
@@ -229,6 +231,7 @@ impl CameraThread {
                 first_frame_time = Some((metadata.timestamp.into(), now));
                 now
             };
+            log::trace!("got camera frame {:?}", frame_time);
             let mut frame = frame.lock().unwrap();
             if let Some(frame) = &mut *frame {
                 frame.frame.resize(frame_data.len(), 0);
@@ -362,7 +365,7 @@ fn main() -> Result<()> {
                 frame_changed = new_frame_elapsed > current_frame_elapsed;
                 if frame_changed {
                     std::mem::swap(&mut maybe_current_frame, &mut *other_frame);
-                    // log::debug!("frame changed");
+                    log::trace!("frame changed");
                 } else if is_synchronized {
                     // Don't wait if we are obliged to synchronize with VR runtime
                     break;
@@ -468,6 +471,7 @@ fn main() -> Result<()> {
         ui_state.handle(&*vrsys)?;
         match ui_state.turn() {
             events::Action::ShowOverlay => {
+                log::debug!("showing overlay");
                 vrsys.show_overlay()?;
                 {
                     let mut other_frame = frame.lock().unwrap();
@@ -480,6 +484,7 @@ fn main() -> Result<()> {
                 app_state.start_capture();
             }
             events::Action::HideOverlay => {
+                log::debug!("hiding overlay");
                 vrsys.hide_overlay()?;
                 maybe_current_frame = None;
                 app_state.stop_capture();
