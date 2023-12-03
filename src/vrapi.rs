@@ -1,5 +1,5 @@
 use itertools::Itertools;
-use nalgebra::{matrix, Affine3, Matrix3, Matrix4, RealField, Translation3, UnitQuaternion};
+use nalgebra::{matrix, Affine3, Matrix3, Matrix4, Translation3, UnitQuaternion};
 use openvr_sys2::{ETrackedPropertyError, EVRInitError, EVRInputError, EVROverlayError};
 use openxr::{
     ApplicationInfo, EnvironmentBlendMode, EventDataBuffer, Extent2Df, Extent2Di, EyeVisibility,
@@ -976,15 +976,6 @@ pub(crate) enum OpenXrError {
     NoSupportedBlendMode,
 }
 
-impl Drop for OpenXr {
-    fn drop(&mut self) {
-        for image in self.swapchain_images.drain(..) {
-            log::info!("destroying image {:#x}", image.handle().as_raw());
-            let _ = Arc::try_unwrap(image).unwrap().into_raw().into_handle();
-        }
-    }
-}
-
 impl OpenXr {
     fn create_vk_device(
         xr_instance: &openxr::Instance,
@@ -1187,7 +1178,7 @@ impl OpenXr {
             .map(|handle| {
                 let handle = ash::vk::Image::from_raw(handle);
                 let raw_image = unsafe {
-                    vulkano::image::sys::RawImage::from_handle(
+                    vulkano::image::sys::RawImage::from_handle_borrowed(
                         device.clone(),
                         handle,
                         ImageCreateInfo {
@@ -1310,7 +1301,7 @@ impl Vr for OpenXr {
                 {
                     self.saved_pose
                 } else {
-                    let poses = [1, 2].map(|id| posef_to_nalgebra(views[id].pose));
+                    let poses = [0, 1].map(|id| posef_to_nalgebra(views[id].pose));
                     let rotation_center = UnitQuaternion::from_quaternion(
                         (poses[0].0.as_ref() + poses[1].0.as_ref()) / 2.0,
                     );

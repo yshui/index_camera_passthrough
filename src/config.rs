@@ -1,4 +1,4 @@
-use nalgebra::{geometry::Transform3, TAffine, Affine3, TCategory};
+use nalgebra::{Affine3, TCategory};
 use serde::{Deserialize, Serialize};
 
 /// Because your eye and the camera is at different physical locations, it is impossible
@@ -26,7 +26,7 @@ fn serialize_transform<S>(transform: &Affine3<f32>, serializer: S) -> Result<S::
 where
     S: serde::Serializer,
 {
-    let mut m = transform.matrix().clone();
+    let m = transform.matrix();
     m.data.0.serialize(serializer)
 }
 fn deserialize_transform<'de, D>(deserializer: D) -> Result<Affine3<f32>, D::Error>
@@ -105,10 +105,7 @@ impl DisplayMode {
         }
     }
     pub(crate) fn is_stereo(&self) -> bool {
-        match self {
-            DisplayMode::Stereo { .. } | DisplayMode::Direct => true,
-            _ => false,
-        }
+        matches!(self, DisplayMode::Stereo { .. } | DisplayMode::Direct)
     }
 }
 
