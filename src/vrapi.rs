@@ -1348,7 +1348,11 @@ impl Vr for OpenXr {
                     .swapchain(&self.swapchain)
                     .image_rect(Rect2Di {
                         offset: Offset2Di {
-                            x: crate::CAMERA_SIZE as i32,
+                            x: if self.display_mode.is_stereo() {
+                                crate::CAMERA_SIZE as i32
+                            } else {
+                                0
+                            },
                             y: 0,
                         },
                         extent: Extent2Di {
