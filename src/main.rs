@@ -23,7 +23,7 @@ use anyhow::{anyhow, Context, Result};
 
 use v4l::video::Capture;
 use vulkano::{
-    image::{AllocateImageError, Image, ImageCreateInfo, ImageLayout, ImageUsage},
+    image::{AllocateImageError, Image, ImageCreateInfo, ImageUsage},
     memory::allocator::{AllocationCreateInfo, MemoryAllocator, MemoryTypeFilter},
     sync::GpuFuture,
     Validated,
@@ -257,10 +257,9 @@ fn main() -> Result<()> {
     first_run(&xdg)?;
 
     let cfg = config::load_config(&xdg)?;
-    if cfg.debug {
-        std::env::set_var("RUST_LOG", "debug");
-    }
-    env_logger::init();
+    let env =
+        env_logger::Env::default().default_filter_or(if cfg.debug { "debug" } else { "info" });
+    env_logger::init_from_env(env);
     let camera = v4l::Device::with_path(if cfg.camera_device.is_empty() {
         find_index_camera()?
     } else {
@@ -315,11 +314,18 @@ fn main() -> Result<()> {
     // Create a VROverlay
     vrsys.set_display_mode(config::DisplayMode::Direct)?;
     // load camera config
-    let camera_config = vrsys
-        .load_camera_paramter()
-        .or_else(steam::find_steam_config); // if the backend doesn't give us the parameters, we try
-                                            // to search in the steam config for whatever that looks
-                                            // like a camera parameter file
+    let camera_config = if let Some(cfg) = vrsys.load_camera_paramter() {
+        Some(cfg)
+    } else if let Some(cfg) = steam::find_steam_config() {
+        // if the backend doesn't give us the parameters, we try
+        // to search in the steam config for whatever that looks
+        // like a camera parameter file
+        vrsys.set_fallback_camera_config(cfg);
+        Some(cfg)
+    } else {
+        log::warn!("No camera parameters found");
+        None
+    };
 
     vrsys.set_position_mode(cfg.overlay.position)?;
 
@@ -341,7 +347,6 @@ fn main() -> Result<()> {
         vrsys.vk_allocator(),
         vrsys.vk_descriptor_set_allocator(),
         config.need_yuv_conversion,
-        cfg.display_mode,
         camera_config,
     )?;
 
@@ -421,11 +426,7 @@ fn main() -> Result<()> {
                     }
 
                     // Submit the texture
-                    vrsys.submit_texture(
-                        ImageLayout::ColorAttachmentOptimal,
-                        elapsed,
-                        &pipeline.fov(),
-                    )?;
+                    vrsys.submit_texture(elapsed, &pipeline.fov())?;
                     frame_changed = false;
                 }
             } else {

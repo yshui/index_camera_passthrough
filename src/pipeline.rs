@@ -43,7 +43,7 @@ impl std::fmt::Debug for Pipeline {
     }
 }
 
-use crate::{config::DisplayMode, CAMERA_SIZE};
+use crate::CAMERA_SIZE;
 
 pub(crate) fn submit_cpu_image(
     img: &[u8],
@@ -207,7 +207,6 @@ impl Pipeline {
         allocator: Arc<dyn MemoryAllocator>,
         descriptor_set_allocator: Arc<dyn DescriptorSetAllocator>,
         source_is_yuv: bool,
-        display_mode: DisplayMode,
         camera_config: Option<crate::vrapi::StereoCamera>,
     ) -> Result<Self> {
         // Allocate intermediate textures
@@ -269,10 +268,10 @@ impl Pipeline {
                     descriptor_set_allocator,
                     textures[0].clone(),
                     &cfg,
-                    matches!(display_mode, DisplayMode::Flat { .. }),
                 )
             })
             .transpose()?;
+        log::debug!("correction fov: {:?}", correction.as_ref().map(|x| x.fov()));
         let fov = correction
             .as_ref()
             .map(|c| c.fov())
@@ -292,7 +291,7 @@ impl Pipeline {
             camera_config,
         })
     }
-    pub fn fov(&self) -> [[f64; 2]; 2] {
+    pub fn fov(&self) -> [[f32; 2]; 2] {
         self.correction
             .as_ref()
             .map(|c| c.fov())

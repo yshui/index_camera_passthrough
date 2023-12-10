@@ -1,5 +1,5 @@
 use itertools::Itertools;
-use nalgebra::{matrix, Affine3, Matrix3, Matrix4, Translation3, UnitQuaternion};
+use nalgebra::{matrix, Affine3, Matrix3, Matrix4, Translation3, UnitQuaternion, Vector3};
 use openvr_sys2::{ETrackedPropertyError, EVRInitError, EVRInputError, EVROverlayError};
 use openxr::{
     ApplicationInfo, EnvironmentBlendMode, EventDataBuffer, Extent2Df, Extent2Di, EyeVisibility,
@@ -113,19 +113,17 @@ pub(crate) trait VkContext {
 pub(crate) trait Vr: VkContext {
     type Error: Send + Sync + 'static;
     fn load_camera_paramter(&mut self) -> Option<StereoCamera>;
+    fn set_fallback_camera_config(&mut self, cfg: StereoCamera);
     /// Submit the render texture to overlay.
     ///
-    /// Must have called `render_texture` before calling this function.
+    /// Must have called `render_texture` before calling this function. The render texture must have
+    /// the ColorAttachmentOptimal layout when this function is called.
     ///
     /// # Arguments
     ///
     /// - `elapsed`: duration since the image was captured.
-    fn submit_texture(
-        &mut self,
-        layout: ImageLayout,
-        elapsed: Duration,
-        fov: &[[f64; 2]; 2],
-    ) -> Result<(), Self::Error>;
+    fn submit_texture(&mut self, elapsed: Duration, fov: &[[f32; 2]; 2])
+        -> Result<(), Self::Error>;
     /// Refresh the overlay using the latest submitted camera texture.
     fn refresh(&mut self) -> Result<(), Self::Error>;
     /// Whether our render loop is synchronized with the VR runtime.
@@ -179,13 +177,15 @@ impl<T: Vr, E: Send + Sync + 'static, F: Fn(<T as Vr>::Error) -> E> Vr for VrMap
     fn load_camera_paramter(&mut self) -> Option<StereoCamera> {
         self.0.load_camera_paramter()
     }
+    fn set_fallback_camera_config(&mut self, cfg: StereoCamera) {
+        self.0.set_fallback_camera_config(cfg)
+    }
     fn submit_texture(
         &mut self,
-        layout: ImageLayout,
         elapsed: Duration,
-        fov: &[[f64; 2]; 2],
+        fov: &[[f32; 2]; 2],
     ) -> Result<(), Self::Error> {
-        self.0.submit_texture(layout, elapsed, fov).map_err(&self.1)
+        self.0.submit_texture(elapsed, fov).map_err(&self.1)
     }
     fn refresh(&mut self) -> Result<(), Self::Error> {
         self.0.refresh().map_err(&self.1)
@@ -247,7 +247,7 @@ pub(crate) struct OpenVr {
     camera_config: Option<StereoCamera>,
     position_mode: PositionMode,
     display_mode: DisplayMode,
-    overlay_transform: Matrix4<f64>,
+    overlay_transform: Matrix4<f32>,
     projector: Option<crate::projection::Projection>,
     device: Arc<Device>,
     queue: Arc<Queue>,
@@ -329,6 +329,10 @@ impl OpenVr {
     pub fn new(xdg: &xdg::BaseDirectories) -> Result<Self, OpenVrError> {
         let sys = crate::openvr::VRSystem::init()?;
         let vroverlay = sys.overlay().create_overlay(APP_KEY, APP_NAME)?;
+        sys.overlay()
+            .pin_mut()
+            .SetOverlayTextureColorSpace(vroverlay, openvr_sys2::EColorSpace::ColorSpace_Linear)
+            .into_result()?;
         let mut input = unsafe { Pin::new_unchecked(&mut *openvr_sys2::VRInput()) };
         let action_manifest = xdg.find_data_file("actions.json").unwrap();
         let action_manifest = std::ffi::CString::new(action_manifest.to_str().unwrap()).unwrap();
@@ -448,7 +452,7 @@ impl OpenVr {
                 .map_err(Into::into)
         }
     }
-    fn set_overlay_transformation(&mut self, transform: Matrix4<f64>) -> Result<(), OpenVrError> {
+    fn set_overlay_transformation(&mut self, transform: Matrix4<f32>) -> Result<(), OpenVrError> {
         self.overlay_transform = transform;
         let vroverlay = self.sys.overlay();
         unsafe {
@@ -461,7 +465,7 @@ impl OpenVr {
         .into_result()
         .map_err(Into::into)
     }
-    fn eye_to_head(&self) -> [Matrix4<f64>; 2] {
+    fn eye_to_head(&self) -> [Matrix4<f32>; 2] {
         let left_eye: Matrix4<_> = self
             .sys
             .pin_mut()
@@ -634,6 +638,10 @@ impl Vr for OpenVr {
             Some(lhcfg)
         }
     }
+    fn set_fallback_camera_config(&mut self, cfg: StereoCamera) {
+        log::warn!("Using fallback camera config");
+        self.camera_config = Some(cfg);
+    }
     fn get_render_texture(&mut self) -> Result<Option<Arc<Image>>, Self::Error> {
         // log::debug!("get_render_texture");
         if self.display_mode.projection_mode().is_none() {
@@ -645,17 +653,16 @@ impl Vr for OpenVr {
     }
     fn submit_texture(
         &mut self,
-        layout: ImageLayout,
         elapsed: Duration,
-        fov: &[[f64; 2]; 2],
+        fov: &[[f32; 2]; 2],
     ) -> Result<(), Self::Error> {
-        let hmd_transform = self.sys.hmd_transform(-elapsed.as_secs_f32());
+        let hmd_transform = self.sys.hmd_transform(-elapsed.as_secs_f32()).cast::<f32>();
         if let PositionMode::Hmd { distance } = self.position_mode {
             let overlay_transform = hmd_transform
                 * matrix![
                     1.0, 0.0, 0.0, 0.0;
                     0.0, 1.0, 0.0, 0.0;
-                    0.0, 0.0, 1.0, -distance as f64;
+                    0.0, 0.0, 1.0, -distance;
                     0.0, 0.0, 0.0, 1.0;
                 ];
             self.set_overlay_transformation(overlay_transform)?;
@@ -663,9 +670,15 @@ impl Vr for OpenVr {
         let output = if self.display_mode.projection_mode().is_some() {
             let new_texture = crate::create_submittable_image(self.allocator.clone())?;
             let eye_to_head = self.eye_to_head();
+            let view_transforms = eye_to_head.map(|m| hmd_transform * m);
             let ipd = self.ipd()?;
             let projector = self.projector.as_mut().unwrap();
-            projector.update_mvps(&self.overlay_transform, fov, &eye_to_head, &hmd_transform)?;
+            projector.update_mvps(
+                &self.overlay_transform,
+                fov,
+                &view_transforms,
+                &hmd_transform,
+            )?;
             projector.set_ipd(ipd);
             let future = projector.project(
                 self.allocator.clone(),
@@ -679,10 +692,13 @@ impl Vr for OpenVr {
             new_texture
         } else {
             let output = self.render_texture.take().unwrap();
-            if layout != ImageLayout::TransferSrcOptimal {
-                transition_layout(layout, &output, &self.queue, self.cmdbuf_allocator.clone())?
-                    .wait(None)?;
-            }
+            transition_layout(
+                ImageLayout::ColorAttachmentOptimal,
+                &output,
+                &self.queue,
+                self.cmdbuf_allocator.clone(),
+            )?
+            .wait(None)?;
             output
         };
         let texture = TextureState {
@@ -744,6 +760,7 @@ impl Vr for OpenVr {
                     self.render_texture.as_ref().unwrap(),
                     1.0,
                     &camera_calib,
+                    ImageLayout::TransferSrcOptimal,
                 )?;
                 projector.set_mode(projection_mode);
                 self.projector = Some(projector);
@@ -879,11 +896,8 @@ impl Vr for OpenVr {
 }
 
 pub(crate) struct OpenXr {
-    entry: openxr::Entry,
     instance: openxr::Instance,
-    system: openxr::SystemId,
     overlay_visible: bool,
-    overlay_transform: Matrix4<f64>,
     position_mode: PositionMode,
     display_mode: DisplayMode,
     allocator: Arc<StandardMemoryAllocator>,
@@ -893,6 +907,7 @@ pub(crate) struct OpenXr {
     action_button1: openxr::Action<bool>,
     action_button2: openxr::Action<bool>,
     action_debug: openxr::Action<bool>,
+    camera_config: Option<StereoCamera>,
 
     session_state: openxr::SessionState,
     session: openxr::Session<openxr::Vulkan>,
@@ -902,7 +917,7 @@ pub(crate) struct OpenXr {
     swapchain_images: Vec<Arc<Image>>,
     frame_state: Option<openxr::FrameState>,
     space: openxr::Space,
-    saved_pose: Matrix4<f32>,
+    saved_poses: [(UnitQuaternion<f32>, Vector3<f32>); 2],
 
     device: Arc<Device>,
     queue: Arc<Queue>,
@@ -1203,11 +1218,9 @@ impl OpenXr {
         session.attach_action_sets(&[&action_set])?;
 
         Ok(Self {
-            entry,
             instance,
-            system,
+            camera_config: None,
             overlay_visible: false,
-            overlay_transform: Matrix4::identity(),
             position_mode: PositionMode::default(),
             display_mode: DisplayMode::default(),
             action_button1,
@@ -1224,7 +1237,7 @@ impl OpenXr {
             swapchain_images,
             frame_state: None,
             space,
-            saved_pose: Matrix4::identity(),
+            saved_poses: [Default::default(); 2],
 
             allocator,
             descriptor_set_allocator,
@@ -1274,56 +1287,87 @@ impl Vr for OpenXr {
     type Error = OpenXrError;
 
     fn load_camera_paramter(&mut self) -> Option<StereoCamera> {
-        crate::steam::find_steam_config()
+        self.camera_config
+    }
+
+    fn set_fallback_camera_config(&mut self, cfg: StereoCamera) {
+        self.camera_config = Some(cfg);
     }
 
     fn submit_texture(
         &mut self,
-        layout: ImageLayout,
         elapsed: Duration,
-        fov: &[[f64; 2]; 2],
+        fov: &[[f32; 2]; 2],
     ) -> Result<(), Self::Error> {
         log::trace!("submit texture");
         let frame_state = self.frame_state.as_ref().unwrap();
         let now = self.instance.now()?;
         let time_at_capture =
             openxr::Time::from_nanos((now.as_nanos() as u128 - elapsed.as_nanos()) as i64);
-        self.swapchain.release_image()?;
-        let posef = match self.position_mode {
-            PositionMode::Hmd { distance } => {
-                let (view_state_flags, views) = self.session.locate_views(
-                    ViewConfigurationType::PRIMARY_STEREO,
-                    time_at_capture,
-                    &self.space,
-                )?;
-                let transform = if !view_state_flags.contains(ViewStateFlags::ORIENTATION_VALID)
-                    || !view_state_flags.contains(ViewStateFlags::POSITION_VALID)
-                {
-                    self.saved_pose
-                } else {
-                    let poses = [0, 1].map(|id| posef_to_nalgebra(views[id].pose));
-                    let rotation_center = UnitQuaternion::from_quaternion(
-                        (poses[0].0.as_ref() + poses[1].0.as_ref()) / 2.0,
-                    );
-                    let center: Translation3<f32> = ((poses[0].1 + poses[1].1) / 2.0).into();
-                    let transform = center.to_homogeneous()
-                        * rotation_center.to_homogeneous()
-                        * matrix![
-                            1.0, 0.0, 0.0, 0.0;
-                            0.0, 1.0, 0.0, 0.0;
-                            0.0, 0.0, 1.0, -distance;
-                            0.0, 0.0, 0.0, 1.0;
-                        ];
-                    self.saved_pose = transform;
-                    transform
-                };
-                affine_to_posef(Affine3::from_matrix_unchecked(transform))
-            }
-            PositionMode::Absolute { transform } => affine_to_posef(transform),
+        let (view_state_flags, views) = self.session.locate_views(
+            ViewConfigurationType::PRIMARY_STEREO,
+            time_at_capture,
+            &self.space,
+        )?;
+        let view_poses = if !view_state_flags.contains(ViewStateFlags::ORIENTATION_VALID)
+            || !view_state_flags.contains(ViewStateFlags::POSITION_VALID)
+        {
+            self.saved_poses
+        } else {
+            let poses = [0, 1].map(|id| posef_to_nalgebra(views[id].pose));
+            self.saved_poses = poses;
+            poses
         };
+        let rotation_center = UnitQuaternion::from_quaternion(
+            (view_poses[0].0.as_ref() + view_poses[1].0.as_ref()) / 2.0,
+        );
+        let center: Translation3<f32> = ((view_poses[0].1 + view_poses[1].1) / 2.0).into();
+        let hmd_transform = center.to_homogeneous() * rotation_center.to_homogeneous();
+        let transform = match self.position_mode {
+            PositionMode::Hmd { distance } => {
+                let transform = hmd_transform
+                    * matrix![
+                        1.0, 0.0, 0.0, 0.0;
+                        0.0, 1.0, 0.0, 0.0;
+                        0.0, 0.0, 1.0, -distance;
+                        0.0, 0.0, 0.0, 1.0;
+                    ];
+                Affine3::from_matrix_unchecked(transform)
+            }
+            PositionMode::Absolute { transform } => transform,
+        };
+        let overlay_posef = affine_to_posef(transform);
+        if self.display_mode.projection_mode().is_some() {
+            // Apply projection
+            let image = self.swapchain.acquire_image()? as usize;
+            let view_transforms = [
+                Translation3::from(view_poses[0].1).to_homogeneous()
+                    * view_poses[0].0.to_homogeneous(),
+                Translation3::from(view_poses[1].1).to_homogeneous()
+                    * view_poses[1].0.to_homogeneous(),
+            ];
+            let ipd = view_poses[1].1.x - view_poses[0].1.x;
+            self.swapchain.wait_image(openxr::Duration::INFINITE)?;
+            let output = self.swapchain_images[image].clone();
+            let projector = self.projector.as_mut().unwrap();
+            projector.update_mvps(transform.matrix(), fov, &view_transforms, &hmd_transform)?;
+            projector.set_ipd(ipd);
+            let future = projector.project(
+                self.allocator.clone(),
+                self.cmdbuf_allocator.clone(),
+                vulkano::sync::future::now(self.device.clone()),
+                &self.queue,
+                output,
+            )?;
+            future.flush()?;
+            future.then_signal_fence().wait(None)?;
+        } else {
+            self.render_texture.take();
+        }
+        self.swapchain.release_image()?;
         let left = openxr::CompositionLayerQuad::<openxr::Vulkan>::new()
             .eye_visibility(EyeVisibility::LEFT)
-            .pose(posef)
+            .pose(overlay_posef)
             .sub_image(
                 SwapchainSubImage::new()
                     .swapchain(&self.swapchain)
@@ -1342,7 +1386,7 @@ impl Vr for OpenXr {
             });
         let right = openxr::CompositionLayerQuad::<openxr::Vulkan>::new()
             .eye_visibility(EyeVisibility::RIGHT)
-            .pose(posef)
+            .pose(overlay_posef)
             .sub_image(
                 SwapchainSubImage::new()
                     .swapchain(&self.swapchain)
@@ -1439,6 +1483,7 @@ impl Vr for OpenXr {
                     self.render_texture.as_ref().unwrap(),
                     1.0,
                     &camera_calib,
+                    ImageLayout::ColorAttachmentOptimal,
                 )?;
                 projector.set_mode(projection_mode);
                 self.projector = Some(projector);

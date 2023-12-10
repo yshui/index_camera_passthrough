@@ -11,29 +11,34 @@ use anyhow::{anyhow, Context, Result};
 /// Try to find the config file for index
 pub fn find_steam_config() -> Option<StereoCamera> {
     let xdg = xdg::BaseDirectories::new().ok()?;
+    log::debug!("Base directories: {:?}", xdg);
     let steam = xdg.find_data_file("steam")?;
-    let steam_config = steam.join("config").join("ligthouse");
-    steam_config
-        .read_dir()
-        .ok()?
-        .filter_map(|dir| {
-            let dir = dir.ok()?;
-            let config = dir.path().join("config.json");
-            let json = std::fs::read_to_string(config).ok()?;
-            let lhconfig: LighthouseConfig = serde_json::from_str(&json).ok()?;
-            let left = lhconfig
-                .tracked_cameras
-                .iter()
-                .copied()
-                .find(|p| p.name == Camera::Left)?;
-            let right = lhconfig
-                .tracked_cameras
-                .iter()
-                .copied()
-                .find(|p| p.name == Camera::Right)?;
-            Some(StereoCamera { left, right })
-        })
-        .next()
+    log::debug!("Steam directory: {:?}", steam);
+    let steam_config = steam.join("config").join("lighthouse");
+    log::debug!("Enumerating steam config dir {:?}", steam_config);
+    let mut files = steam_config.read_dir().ok()?;
+    files.find_map(|dir| {
+        log::debug!("Trying to find config in {:?}", dir);
+        let dir = dir.ok()?;
+        let config = dir.path().join("config.json");
+        log::debug!("Trying to config from {:?}", config);
+        let json = std::fs::read_to_string(config).ok()?;
+        log::debug!("Trying to parse config");
+        let lhconfig: LighthouseConfig = serde_json::from_str(&json).ok()?;
+        log::debug!("Trying to find left camera");
+        let left = lhconfig
+            .tracked_cameras
+            .iter()
+            .copied()
+            .find(|p| p.name == Camera::Left)?;
+        log::debug!("Trying to find right camera");
+        let right = lhconfig
+            .tracked_cameras
+            .iter()
+            .copied()
+            .find(|p| p.name == Camera::Right)?;
+        Some(StereoCamera { left, right })
+    })
 }
 pub fn load_steam_config(hmd_serial: &str) -> Result<StereoCamera> {
     let xdg = xdg::BaseDirectories::new()?;

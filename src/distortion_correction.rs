@@ -56,7 +56,7 @@ pub struct StereoCorrection {
     pipelines: [Arc<GraphicsPipeline>; 2],
     desc_sets: [Arc<DescriptorSet>; 2],
     /// field-of-view parameter, 0 = left eye, 1 = right eye
-    fov: [[f64; 2]; 2],
+    fov: [[f32; 2]; 2],
 }
 
 impl std::fmt::Debug for StereoCorrection {
@@ -77,7 +77,7 @@ impl std::fmt::Debug for StereoCorrection {
 }
 
 impl StereoCorrection {
-    pub fn fov(&self) -> [[f64; 2]; 2] {
+    pub fn fov(&self) -> [[f32; 2]; 2] {
         self.fov
     }
     /// i.e. solving Undistort(src) = dst for the smallest non-zero root.
@@ -116,23 +116,26 @@ impl StereoCorrection {
     // the edge of the field of view of the distorted image.
     //
     // Returns the scales and the adjusted fovs
-    fn find_scale(coeff: &[f64; 4], center: &[f64; 2], focal: &[f64; 2]) -> [(f64, f64); 2] {
+    fn find_scale(coeff: &[f64; 4], center: &[f64; 2], focal: &[f64; 2]) -> [(f32, f32); 2] {
         [0, 1].map(|i| {
             let min_edge_dist = center[i].min(1.0 - center[i]) / focal[i];
             // Find the input theta angle where Undistort(theta) = min_edge_dist
             if let Some(theta) = Self::undistort_inverse(coeff, min_edge_dist) {
                 if theta >= std::f64::consts::PI / 2.0 {
                     // infinity?
-                    (1.0, focal[i])
+                    (1.0, focal[i] as f32)
                 } else {
                     // Find the input coordinates that will give us that theta
                     let target_edge = theta.tan();
                     log::info!("{}", target_edge);
-                    (target_edge / (0.5 / focal[i]), 1.0 / min_edge_dist / 2.0)
+                    (
+                        (target_edge / (0.5 / focal[i])) as f32,
+                        (1.0 / min_edge_dist / 2.0) as f32,
+                    )
                 }
             } else {
                 // Cannot find scale so just don't scale
-                (1.0, focal[i])
+                (1.0, focal[i] as f32)
             }
         })
     }
@@ -150,7 +153,6 @@ impl StereoCorrection {
         descriptor_set_allocator: Arc<dyn DescriptorSetAllocator>,
         input: Arc<Image>,
         camera_calib: &crate::vrapi::StereoCamera,
-        is_final: bool,
     ) -> Result<Self> {
         let [w, h, _] = input.extent();
         if w != h * 2 {
@@ -199,11 +201,7 @@ impl StereoCorrection {
                         samples: 1,
                         load_op: Load,
                         store_op: Store,
-                        final_layout: if is_final {
-                            ImageLayout::TransferSrcOptimal
-                        } else {
-                            ImageLayout::ColorAttachmentOptimal
-                        },
+                        final_layout: ImageLayout::ColorAttachmentOptimal,
                     }
                 },
                 pass: {
@@ -281,7 +279,7 @@ impl StereoCorrection {
                 dcoef: coeff.map(|x| x as f32),
                 focal: focal.map(|x| x as f32),
                 sensorSize: (size as f32).into(),
-                scale: [scale_fov[id][0].0 as f32, scale_fov[id][1].0 as f32],
+                scale: [scale_fov[id][0].0, scale_fov[id][1].0],
                 texOffset: [0.5 * id as f32, 0.0],
             };
             let uniform = Buffer::from_data(

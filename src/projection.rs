@@ -160,15 +160,15 @@ impl Projection {
     /// time_origin = instant when the first frame is taken
     pub(crate) fn update_mvps(
         &mut self,
-        overlay_transform: &Matrix4<f64>,
-        fov: &[[f64; 2]; 2],
-        eye_to_head: &[Matrix4<f64>; 2],
-        hmd_transform: &Matrix4<f64>,
+        overlay_transform: &Matrix4<f32>,
+        fov: &[[f32; 2]; 2],
+        view_tranforms: &[Matrix4<f32>; 2],
+        hmd_transform: &Matrix4<f32>,
     ) -> Result<(), ProjectorError> {
         let left_extrinsics_position = self
             .saved_parameters
             .camera_calib
-            .map(|c| c.left.extrinsics.position)
+            .map(|c| c.left.extrinsics.position.map(|x| x as f32))
             .unwrap_or_default();
         // Camera space to HMD space transform, based on physical measurements
         let left_cam: Matrix4<_> = matrix![
@@ -180,7 +180,7 @@ impl Projection {
         let right_extrinsics_position = self
             .saved_parameters
             .camera_calib
-            .map(|c| c.right.extrinsics.position)
+            .map(|c| c.right.extrinsics.position.map(|x| x as f32))
             .unwrap_or_default();
         let right_cam: Matrix4<_> = matrix![
             1.0, 0.0, 0.0, -right_extrinsics_position[0];
@@ -189,10 +189,12 @@ impl Projection {
             0.0, 0.0, 0.0, 1.0;
         ];
 
+        log::trace!("eye to head: left: {:?} right: {:?}", view_tranforms[0], view_tranforms[1]);
+
         let (left_eye, right_eye) = match self.saved_parameters.mode {
             ProjectionMode::FromEye => (
-                hmd_transform * eye_to_head[0],
-                hmd_transform * eye_to_head[1],
+                view_tranforms[0],
+                view_tranforms[1],
             ),
             ProjectionMode::FromCamera => (hmd_transform * left_cam, hmd_transform * right_cam),
         };
@@ -313,6 +315,7 @@ impl Projection {
         source: &Arc<Image>,
         overlay_width: f32,
         camera_calib: &Option<crate::vrapi::StereoCamera>,
+        final_layout: ImageLayout,
     ) -> Result<Self, ProjectorError> {
         let [w, h, _] = source.extent();
         if w != h * 2 {
@@ -327,7 +330,7 @@ impl Projection {
                     samples: 1,
                     load_op: Load,
                     store_op: Store,
-                    final_layout: ImageLayout::TransferSrcOptimal,
+                    final_layout: final_layout,
                 }
             },
             pass: {
