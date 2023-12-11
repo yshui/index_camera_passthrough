@@ -1247,7 +1247,7 @@ impl OpenXr {
             ],
         )?;
         instance.suggest_interaction_profile_bindings(
-            instance.string_to_path(" /interaction_profiles/khr/simple_controller")?,
+            instance.string_to_path("/interaction_profiles/khr/simple_controller")?,
             &[
                 openxr::Binding::new(
                     &action_button1,
