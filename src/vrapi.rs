@@ -1212,6 +1212,57 @@ impl OpenXr {
         let action_button1 = action_set.create_action("button1", "Button1", &[])?;
         let action_button2 = action_set.create_action("button2", "Button2", &[])?;
         let action_debug = action_set.create_action("debug", "Debug", &[])?;
+        instance.suggest_interaction_profile_bindings(
+            instance.string_to_path("/interaction_profiles/htc/vive_controller")?,
+            &[
+                openxr::Binding::new(
+                    &action_button1,
+                    instance.string_to_path("/user/hand/left/input/menu/click")?,
+                ),
+                openxr::Binding::new(
+                    &action_button2,
+                    instance.string_to_path("/user/hand/right/input/menu/click")?,
+                ),
+                openxr::Binding::new(
+                    &action_debug,
+                    instance.string_to_path("/user/hand/left/input/trigger/click")?,
+                ),
+            ],
+        )?;
+        instance.suggest_interaction_profile_bindings(
+            instance.string_to_path("/interaction_profiles/valve/index_controller")?,
+            &[
+                openxr::Binding::new(
+                    &action_button1,
+                    instance.string_to_path("/user/hand/left/input/b/click")?,
+                ),
+                openxr::Binding::new(
+                    &action_button2,
+                    instance.string_to_path("/user/hand/right/input/b/click")?,
+                ),
+                openxr::Binding::new(
+                    &action_debug,
+                    instance.string_to_path("/user/hand/left/input/trigger/click")?,
+                ),
+            ],
+        )?;
+        instance.suggest_interaction_profile_bindings(
+            instance.string_to_path(" /interaction_profiles/khr/simple_controller")?,
+            &[
+                openxr::Binding::new(
+                    &action_button1,
+                    instance.string_to_path("/user/hand/left/input/menu/click")?,
+                ),
+                openxr::Binding::new(
+                    &action_button2,
+                    instance.string_to_path("/user/hand/right/input/menu/click")?,
+                ),
+                openxr::Binding::new(
+                    &action_debug,
+                    instance.string_to_path("/user/hand/left/input/select/click")?,
+                ),
+            ],
+        )?;
         let space =
             session.create_reference_space(ReferenceSpaceType::STAGE, openxr::Posef::IDENTITY)?;
         log::debug!("created actions");
