@@ -173,6 +173,10 @@ pub const fn default_open_delay() -> std::time::Duration {
     std::time::Duration::ZERO
 }
 
+pub const fn default_z_order() -> u32 {
+    u32::MAX
+}
+
 /// Index camera passthrough
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
@@ -195,6 +199,10 @@ pub struct Config {
     /// closing the overlay is always instantaneous
     #[serde(default = "default_open_delay", with = "humantime_serde")]
     pub open_delay: std::time::Duration,
+    /// z order of the overlay. higher z order means the overlay is on top of
+    /// other overlays. Not supported on all backends, supported on OpenXR.
+    #[serde(default = "default_z_order")]
+    pub z_order: u32,
     /// enable debug option, including:
     ///   - use trigger button to do renderdoc capture
     #[serde(default)]
@@ -211,6 +219,7 @@ impl Default for Config {
             toggle_button: default_toggle_button(),
             open_delay: std::time::Duration::ZERO,
             debug: false,
+            z_order: default_z_order(),
         }
     }
 }

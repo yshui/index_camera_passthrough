@@ -306,7 +306,7 @@ fn main() -> Result<()> {
     log::info!("{:?}", cfg.backend);
     let mut vrsys = match cfg.backend {
         Backend::OpenVR => crate::vrapi::OpenVr::new(&xdg)?.boxed(),
-        Backend::OpenXR => crate::vrapi::OpenXr::new()?.boxed(),
+        Backend::OpenXR => crate::vrapi::OpenXr::new(cfg.z_order)?.boxed(),
     };
     let instance = vrsys.vk_instance();
     let (device, queue) = vrsys.vk_device(&instance);

@@ -1100,7 +1100,7 @@ impl OpenXr {
             Instance::from_handle(get_vulkan_library().clone(), instance, vulkano_create_info)
         })
     }
-    pub(crate) fn new() -> Result<Self, OpenXrError> {
+    pub(crate) fn new(placement: u32) -> Result<Self, OpenXrError> {
         let entry = unsafe { openxr::Entry::load()? };
         let mut extension = openxr::ExtensionSet::default();
         extension.extx_overlay = true;
@@ -1141,7 +1141,7 @@ impl OpenXr {
             ty: openxr::sys::SessionCreateInfoOverlayEXTX::TYPE,
             next: std::ptr::null(),
             create_flags: OverlaySessionCreateFlagsEXTX::EMPTY,
-            session_layers_placement: 0,
+            session_layers_placement: placement,
         };
         let binding = openxr::sys::GraphicsBindingVulkanKHR {
             ty: openxr::sys::GraphicsBindingVulkanKHR::TYPE,
