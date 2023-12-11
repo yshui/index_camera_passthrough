@@ -13,6 +13,10 @@ toggle_button = "Menu"
 ## closing the overlay is always instantaneous
 open_delay = "0s"
 
+## z order of the overlay. higher z order means the overlay is on top of
+## other overlays. Not supported on all backends, supported on OpenXR.
+z_order = 4294967295
+
 [overlay.position]
 ## how will the overlay be positioned.
 ## possible values:
