@@ -44,6 +44,7 @@ pub fn load_steam_config(hmd_serial: &str) -> Result<StereoCamera> {
     let xdg = xdg::BaseDirectories::new()?;
     let steam = xdg
         .find_data_file("steam")
+        .or_else(|| xdg.find_data_file("Steam"))
         .with_context(|| anyhow!("Cannot find steam directory"))?;
     let lhconfig = std::fs::read_to_string(
         steam
