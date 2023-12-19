@@ -1561,9 +1561,13 @@ impl Vr for OpenXr {
             && self.session_state != openxr::SessionState::IDLE
             && self.session_state != openxr::SessionState::STOPPING
         {
-            self.session.end()?;
+            match self.session.end() {
+                Err(openxr::sys::Result::ERROR_SESSION_NOT_STOPPING) | Ok(_) => Ok(()),
+                Err(e) => Err(e.into()),
+            }
+        } else {
+            Ok(())
         }
-        Ok(())
     }
 
     fn set_position_mode(&mut self, mode: PositionMode) -> Result<(), Self::Error> {
