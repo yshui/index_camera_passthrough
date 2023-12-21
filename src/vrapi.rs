@@ -16,7 +16,7 @@ use std::{
 use vulkano::{
     command_buffer::{
         allocator::{CommandBufferAllocator, StandardCommandBufferAllocator},
-        sys::{CommandBufferBeginInfo, UnsafeCommandBufferBuilder},
+        sys::{CommandBufferBeginInfo, RawRecordingCommandBuffer},
         CommandBufferLevel, CommandBufferUsage,
     },
     descriptor_set::allocator::{
@@ -552,7 +552,7 @@ fn transition_layout(
     cmdbuf_allocator: Arc<dyn CommandBufferAllocator>,
 ) -> Result<vulkano::sync::fence::Fence, vulkano::Validated<vulkano::VulkanError>> {
     let cmdbuf = unsafe {
-        let mut builder = UnsafeCommandBufferBuilder::new(
+        let mut builder = RawRecordingCommandBuffer::new(
             cmdbuf_allocator,
             queue.queue_family_index(),
             CommandBufferLevel::Primary,
@@ -581,7 +581,7 @@ fn transition_layout(
             .collect(),
             ..Default::default()
         })?;
-        builder.build()?
+        builder.end()?
     };
     let fence = vulkano::sync::fence::Fence::new(
         queue.device().clone(),

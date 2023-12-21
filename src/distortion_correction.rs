@@ -5,9 +5,9 @@ use std::sync::Arc;
 use vulkano::{
     buffer::{Buffer, BufferCreateInfo, BufferUsage},
     command_buffer::{
-        allocator::CommandBufferAllocator, AutoCommandBufferBuilder,
-        CommandBufferUsage::OneTimeSubmit, RenderPassBeginInfo, SubpassBeginInfo, SubpassContents,
-        SubpassEndInfo,
+        allocator::CommandBufferAllocator, CommandBufferBeginInfo, CommandBufferLevel,
+        CommandBufferUsage::OneTimeSubmit, RecordingCommandBuffer, RenderPassBeginInfo,
+        SubpassBeginInfo, SubpassContents, SubpassEndInfo,
     },
     descriptor_set::{allocator::DescriptorSetAllocator, DescriptorSet, WriteDescriptorSet},
     device::{Device, Queue},
@@ -340,10 +340,14 @@ impl StereoCorrection {
                 return Err(anyhow!("Queue mismatch"));
             }
         }
-        let mut cmdbuf = AutoCommandBufferBuilder::primary(
+        let mut cmdbuf = RecordingCommandBuffer::new(
             cmdbuf_allocator,
             queue.queue_family_index(),
-            OneTimeSubmit,
+            CommandBufferLevel::Primary,
+            CommandBufferBeginInfo {
+                usage: OneTimeSubmit,
+                ..Default::default()
+            },
         )?;
         let vertex_buffer = Buffer::from_iter::<Vertex, _>(
             allocator,
@@ -411,7 +415,7 @@ impl StereoCorrection {
                 .draw(vertex_buffer.len() as u32, 1, 0, 0)?
                 .end_render_pass(SubpassEndInfo::default())?;
         }
-        Ok(after.then_execute(queue.clone(), cmdbuf.build()?)?)
+        Ok(after.then_execute(queue.clone(), cmdbuf.end()?)?)
     }
 }
 

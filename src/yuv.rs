@@ -4,8 +4,9 @@ use std::sync::Arc;
 use vulkano::{
     buffer::{Buffer, BufferCreateInfo, BufferUsage},
     command_buffer::{
-        allocator::CommandBufferAllocator, AutoCommandBufferBuilder,
-        CommandBufferUsage::OneTimeSubmit, RenderPassBeginInfo, SubpassEndInfo,
+        allocator::CommandBufferAllocator, CommandBufferBeginInfo, CommandBufferLevel,
+        CommandBufferUsage::OneTimeSubmit, RecordingCommandBuffer, RenderPassBeginInfo,
+        SubpassEndInfo,
     },
     command_buffer::{SubpassBeginInfo, SubpassContents},
     descriptor_set::{allocator::DescriptorSetAllocator, DescriptorSet, WriteDescriptorSet},
@@ -208,10 +209,14 @@ impl GpuYuyvConverter {
                 return Err(anyhow!("Queue mismatch"));
             }
         }
-        let mut cmdbuf = AutoCommandBufferBuilder::primary(
+        let mut cmdbuf = RecordingCommandBuffer::new(
             cmdbuf_allocator,
             queue.queue_family_index(),
-            OneTimeSubmit,
+            CommandBufferLevel::Primary,
+            CommandBufferBeginInfo {
+                usage: OneTimeSubmit,
+                ..Default::default()
+            },
         )?;
         // Build a pipeline to do yuyv -> rgb
         let vertex_buffer = Buffer::from_iter::<Vertex, _>(
@@ -279,9 +284,7 @@ impl GpuYuyvConverter {
             .map_err(|e| ConverterError::Anyhow(e.into()))?;
         Ok(after.then_execute(
             queue.clone(),
-            cmdbuf
-                .build()
-                .map_err(|e| ConverterError::Anyhow(e.into()))?,
+            cmdbuf.end().map_err(|e| ConverterError::Anyhow(e.into()))?,
         )?)
     }
 }

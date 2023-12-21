@@ -4,8 +4,8 @@ use anyhow::Result;
 use vulkano::{
     buffer::{Buffer, BufferCreateInfo, BufferUsage},
     command_buffer::{
-        allocator::CommandBufferAllocator, AutoCommandBufferBuilder, CommandBufferUsage,
-        CopyBufferToImageInfo, PrimaryCommandBufferAbstract,
+        allocator::CommandBufferAllocator, CommandBufferBeginInfo, CommandBufferLevel,
+        CommandBufferUsage, CopyBufferToImageInfo, RecordingCommandBuffer,
     },
     descriptor_set::allocator::DescriptorSetAllocator,
     device::{Device, DeviceOwned},
@@ -67,13 +67,17 @@ pub(crate) fn submit_cpu_image(
         img.len() as u64,
     )?;
     buffer.write()?.copy_from_slice(img);
-    let mut cmdbuf = AutoCommandBufferBuilder::primary(
+    let mut cmdbuf = RecordingCommandBuffer::new(
         cmdbuf_allocator,
         queue.queue_family_index(),
-        CommandBufferUsage::OneTimeSubmit,
+        CommandBufferLevel::Primary,
+        CommandBufferBeginInfo {
+            usage: CommandBufferUsage::OneTimeSubmit,
+            ..Default::default()
+        },
     )?;
     cmdbuf.copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(buffer, output))?;
-    Ok(cmdbuf.build()?.execute(queue.clone())?)
+    Ok(cmdbuf.end()?.execute(queue.clone())?)
 }
 
 enum EitherGpuFuture<L, R> {

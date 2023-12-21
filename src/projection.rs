@@ -16,9 +16,9 @@ use vulkano::{
         AllocateBufferError, Buffer, BufferContents, BufferCreateInfo, BufferUsage, Subbuffer,
     },
     command_buffer::{
-        allocator::CommandBufferAllocator, AutoCommandBufferBuilder, CommandBufferExecError,
-        CommandBufferUsage::OneTimeSubmit, RenderPassBeginInfo, SubpassBeginInfo, SubpassContents,
-        SubpassEndInfo,
+        allocator::CommandBufferAllocator, CommandBufferBeginInfo, CommandBufferExecError,
+        CommandBufferLevel, CommandBufferUsage::OneTimeSubmit, RecordingCommandBuffer,
+        RenderPassBeginInfo, SubpassBeginInfo, SubpassContents, SubpassEndInfo,
     },
     descriptor_set::{allocator::DescriptorSetAllocator, DescriptorSet, WriteDescriptorSet},
     device::{Device, Queue},
@@ -189,13 +189,14 @@ impl Projection {
             0.0, 0.0, 0.0, 1.0;
         ];
 
-        log::trace!("eye to head: left: {:?} right: {:?}", view_tranforms[0], view_tranforms[1]);
+        log::trace!(
+            "eye to head: left: {:?} right: {:?}",
+            view_tranforms[0],
+            view_tranforms[1]
+        );
 
         let (left_eye, right_eye) = match self.saved_parameters.mode {
-            ProjectionMode::FromEye => (
-                view_tranforms[0],
-                view_tranforms[1],
-            ),
+            ProjectionMode::FromEye => (view_tranforms[0], view_tranforms[1]),
             ProjectionMode::FromCamera => (hmd_transform * left_cam, hmd_transform * right_cam),
         };
         let left_view = left_eye
@@ -461,10 +462,14 @@ impl Projection {
         )?;
         let ProjectionParameters { overlay_width, .. } = &self.saved_parameters;
         let [w, h] = self.extent;
-        let mut cmdbuf = AutoCommandBufferBuilder::primary(
+        let mut cmdbuf = RecordingCommandBuffer::new(
             cmdbuf_allocator,
             queue.queue_family_index(),
-            OneTimeSubmit,
+            CommandBufferLevel::Primary,
+            CommandBufferBeginInfo {
+                usage: OneTimeSubmit,
+                ..Default::default()
+            },
         )?;
         //cmdbuf.copy_image(CopyImageInfo::images(self.source.clone(), output.clone()))?;
 
@@ -567,6 +572,6 @@ impl Projection {
             .bind_vertex_buffers(0, vertex_buffer.clone())?
             .draw(vertex_buffer.len() as u32, 1, 0, 0)?
             .end_render_pass(SubpassEndInfo::default())?;
-        Ok(after.then_execute(queue.clone(), cmdbuf.build()?)?)
+        Ok(after.then_execute(queue.clone(), cmdbuf.end()?)?)
     }
 }
