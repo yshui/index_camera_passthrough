@@ -1561,6 +1561,34 @@ impl Vr for OpenXr {
             && self.session_state != openxr::SessionState::IDLE
             && self.session_state != openxr::SessionState::STOPPING
         {
+            // HACK!: show a zero sized quad to hide the overlay. It's a bit ugly we
+            // blocks the mainloop here to wait for a frame
+            let frame_state = self.frame_waiter.wait()?;
+            self.frame_stream.begin()?;
+            let empty = openxr::CompositionLayerQuad::<openxr::Vulkan>::new()
+                .eye_visibility(EyeVisibility::BOTH)
+                .pose(openxr::Posef::IDENTITY)
+                .sub_image(
+                    SwapchainSubImage::new()
+                        .swapchain(&self.swapchain)
+                        .image_rect(Rect2Di {
+                            offset: Offset2Di { x: 0, y: 0 },
+                            extent: Extent2Di {
+                                width: 1,
+                                height: 1,
+                            },
+                        }),
+                )
+                .space(&self.space)
+                .size(Extent2Df {
+                    width: 0.0,
+                    height: 0.0,
+                });
+            self.frame_stream.end(
+                frame_state.predicted_display_time,
+                EnvironmentBlendMode::OPAQUE,
+                &[&empty],
+            )?;
             match self.session.end() {
                 Err(openxr::sys::Result::ERROR_SESSION_NOT_STOPPING) | Ok(_) => Ok(()),
                 Err(e) => Err(e.into()),
