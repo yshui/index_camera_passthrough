@@ -8,10 +8,10 @@
   outputs = { self, nixpkgs, fenix }: let
     system = "x86_64-linux";
     pkgs = import nixpkgs { inherit system; overlays = [ fenix.overlays.default ]; };
-    sources = import ./nix/sources.nix;
+    sources = (builtins.fromJSON (builtins.readFile ./sources.json)).sources;
     rust-toolchain = pkgs.fenix.fromToolchainFile {
       file = ./rust-toolchain.toml;
-      sha256 = sources.channel-rust-nightly.sha256;
+      sha256 = sources.channel-rust-nightly.hash;
     };
   in with pkgs; {
     devShells.${system}.default = mkShell {
