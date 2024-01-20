@@ -3,16 +3,22 @@
     inputs.nixpkgs.follows = "nixpkgs";
     url = github:nix-community/fenix;
   };
-  description = "A very basic flake";
+  inputs.rust-manifest = {
+    flake = false;
+    url = "https://static.rust-lang.org/dist/channel-rust-nightly.toml";
+  };
+  description = "index_camera_passthrough";
 
-  outputs = { self, nixpkgs, fenix }: let
+  outputs = { self, nixpkgs, fenix, ... } @ inputs: let
     system = "x86_64-linux";
     pkgs = import nixpkgs { inherit system; overlays = [ fenix.overlays.default ]; };
-    sources = (builtins.fromJSON (builtins.readFile ./sources.json)).sources;
-    rust-toolchain = pkgs.fenix.fromToolchainFile {
-      file = ./rust-toolchain.toml;
-      sha256 = sources.channel-rust-nightly.hash;
-    };
+    rust-toolchain = (pkgs.fenix.fromManifestFile inputs.rust-manifest).withComponents [
+      "rustfmt"
+      "rust-src"
+      "clippy"
+      "rustc"
+      "cargo"
+    ];
   in with pkgs; {
     devShells.${system}.default = mkShell {
       nativeBuildInputs = [ pkg-config cmake rust-toolchain ];

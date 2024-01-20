@@ -38,7 +38,8 @@
     "root": {
       "inputs": {
         "fenix": "fenix",
-        "nixpkgs": "nixpkgs"
+        "nixpkgs": "nixpkgs",
+        "rust-manifest": "rust-manifest"
       }
     },
     "rust-analyzer-src": {
@@ -56,6 +57,18 @@
         "ref": "nightly",
         "repo": "rust-analyzer",
         "type": "github"
+      }
+    },
+    "rust-manifest": {
+      "flake": false,
+      "locked": {
+        "narHash": "sha256-g+r2pHDL2vri0uDfk4WN9cti0zEvCn65onZHmcS0vGM=",
+        "type": "file",
+        "url": "https://static.rust-lang.org/dist/channel-rust-nightly.toml"
+      },
+      "original": {
+        "type": "file",
+        "url": "https://static.rust-lang.org/dist/channel-rust-nightly.toml"
       }
     }
   },
