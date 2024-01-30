@@ -211,7 +211,8 @@ impl CameraThread {
         let mut first_frame_time = None;
         // We want to make the latency as low as possible, so only set a single buffer.
         let mut video_stream =
-            v4l::prelude::MmapStream::with_buffers(&camera, v4l::buffer::Type::VideoCapture, 1)?;
+            v4l::prelude::MmapStream::with_buffers(&camera, v4l::buffer::Type::VideoCapture, 1)
+                .context("cannot open camera mmap stream")?;
         loop {
             {
                 let guard = state.lock();
@@ -264,7 +265,8 @@ fn main() -> Result<()> {
         find_index_camera()?
     } else {
         std::path::Path::new(&cfg.camera_device).to_owned()
-    })?;
+    })
+    .context("cannot open camera device")?;
     if !camera
         .query_caps()?
         .capabilities
