@@ -1085,7 +1085,7 @@ impl OpenXr {
         let create_info = ash::vk::InstanceCreateInfo::builder()
             .enabled_extension_names(&extensions)
             .application_info(&application_info)
-            .enabled_layer_names(&[b"VK_LAYER_KHRONOS_validation\0".as_ptr() as _])
+            //.enabled_layer_names(&[b"VK_LAYER_KHRONOS_validation\0".as_ptr() as _])
             .build();
         let instance = unsafe {
             xr_instance.create_vulkan_instance(
