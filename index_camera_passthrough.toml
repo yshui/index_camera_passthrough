@@ -22,10 +22,11 @@ z_order = 4294967295
 ## possible values:
 ##   - "Hmd":      stay in front of your Hmd
 ##   - "Absolute": fixed place in VR space
+##   - "Sticky":   like "Absolute" but the overlay is repositionable
 mode = "Hmd"
 
 ## how far away should the overlay be placed
-## only meaningful if mode is "Hmd"
+## only meaningful if mode is "Hmd" or "Sticky"
 distance = 1.0
 
 ## transformation matrix for absolute position, column-major

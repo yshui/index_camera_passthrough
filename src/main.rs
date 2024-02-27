@@ -494,6 +494,9 @@ fn main() -> Result<()> {
             }
             _ => (),
         }
+        if vrsys.get_action_state(vrapi::Action::Reposition)? {
+            vrsys.set_position_mode(cfg.overlay.position)?;
+        }
     }
     camera_thread.join().unwrap()?;
     Ok(())

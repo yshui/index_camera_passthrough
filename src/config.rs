@@ -1,4 +1,4 @@
-use nalgebra::{Affine3, TCategory};
+use nalgebra::{matrix, Affine3, Matrix4, TCategory};
 use serde::{Deserialize, Serialize};
 
 /// Because your eye and the camera is at different physical locations, it is impossible
@@ -49,6 +49,17 @@ pub enum PositionMode {
         #[serde(default = "default_overlay_distance")]
         distance: f32,
     },
+    /// the overlay will stick to a fixed position in world space, but it can be repositioned
+    /// by pressing the repositioning button
+    Sticky {
+        /// how far away from your face should the overlay be, when you reposition the overlay.
+        #[serde(default = "default_overlay_distance")]
+        distance: f32,
+
+        /// internal use, the position to stick to
+        #[serde(skip)]
+        transform: Affine3<f32>,
+    },
     /// the overlay is at a fixed location in space
     Absolute {
         /// transformation matrix for the overlay
@@ -58,6 +69,42 @@ pub enum PositionMode {
         )]
         transform: Affine3<f32>,
     },
+}
+
+impl PositionMode {
+    pub fn transform(&self, hmd_transform: Matrix4<f32>) -> Affine3<f32> {
+        match self {
+            &PositionMode::Hmd { distance } => {
+                let transform = hmd_transform
+                    * matrix![
+                        1.0, 0.0, 0.0, 0.0;
+                        0.0, 1.0, 0.0, 0.0;
+                        0.0, 0.0, 1.0, -distance;
+                        0.0, 0.0, 0.0, 1.0;
+                    ];
+                Affine3::from_matrix_unchecked(transform)
+            }
+            &PositionMode::Absolute { transform, .. } | &PositionMode::Sticky { transform, .. } => {
+                transform
+            }
+        }
+    }
+    pub fn reposition(&mut self, hmd_transform: Matrix4<f32>) {
+        if let PositionMode::Sticky {
+            transform,
+            distance,
+        } = self
+        {
+            let new_transform = hmd_transform
+                * matrix![
+                    1.0, 0.0, 0.0, 0.0;
+                    0.0, 1.0, 0.0, 0.0;
+                    0.0, 0.0, 1.0, -*distance;
+                    0.0, 0.0, 0.0, 1.0;
+                ];
+            *transform = Affine3::from_matrix_unchecked(new_transform);
+        }
+    }
 }
 
 impl Default for PositionMode {

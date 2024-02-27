@@ -247,6 +247,7 @@ pub(crate) struct OpenVr {
     texture: Option<TextureState>,
     camera_config: Option<StereoCamera>,
     position_mode: PositionMode,
+    reposition: bool,
     display_mode: DisplayMode,
     overlay_transform: Matrix4<f32>,
     projector: Option<crate::projection::Projection>,
@@ -398,6 +399,7 @@ impl OpenVr {
             texture: None,
             display_mode: DisplayMode::default(),
             position_mode: PositionMode::default(),
+            reposition: false,
             projector: None,
             overlay_transform: Matrix4::identity(),
             camera_config: None,
@@ -659,15 +661,15 @@ impl Vr for OpenVr {
         fov: &[[f32; 2]; 2],
     ) -> Result<(), Self::Error> {
         let hmd_transform = self.sys.hmd_transform(-elapsed.as_secs_f32()).cast::<f32>();
-        if let PositionMode::Hmd { distance } = self.position_mode {
-            let overlay_transform = hmd_transform
-                * matrix![
-                    1.0, 0.0, 0.0, 0.0;
-                    0.0, 1.0, 0.0, 0.0;
-                    0.0, 0.0, 1.0, -distance;
-                    0.0, 0.0, 0.0, 1.0;
-                ];
-            self.set_overlay_transformation(overlay_transform)?;
+        if self.reposition {
+            self.reposition = false;
+            self.position_mode.reposition(hmd_transform);
+
+            let transform: Matrix4<f32> = self.position_mode.transform(hmd_transform).into();
+            self.set_overlay_transformation(transform)?;
+        } else if matches!(self.position_mode, PositionMode::Hmd { .. }) {
+            let transform: Matrix4<f32> = self.position_mode.transform(hmd_transform).into();
+            self.set_overlay_transformation(transform)?;
         }
         let output = if self.display_mode.projection_mode().is_some() {
             let new_texture = crate::create_submittable_image(self.allocator.clone())?;
@@ -820,9 +822,15 @@ impl Vr for OpenVr {
     }
     fn set_position_mode(&mut self, mode: PositionMode) -> Result<(), Self::Error> {
         self.position_mode = mode;
-        if let PositionMode::Absolute { transform } = mode {
-            let transform: Matrix4<f32> = transform.into();
-            self.set_overlay_transformation(transform.cast())?;
+        match mode {
+            PositionMode::Absolute { transform } => {
+                let transform: Matrix4<f32> = transform.into();
+                self.set_overlay_transformation(transform.cast())?;
+            }
+            PositionMode::Sticky { .. } => {
+                self.reposition = true;
+            }
+            _ => (),
         }
         Ok(())
     }
@@ -901,6 +909,7 @@ pub(crate) struct OpenXr {
     instance: openxr::Instance,
     overlay_visible: bool,
     position_mode: PositionMode,
+    reposition: bool,
     display_mode: DisplayMode,
     allocator: Arc<StandardMemoryAllocator>,
     descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
@@ -1289,6 +1298,7 @@ impl OpenXr {
             camera_config: None,
             overlay_visible: false,
             position_mode: PositionMode::default(),
+            reposition: false,
             display_mode: DisplayMode::default(),
             action_button1,
             action_button2,
@@ -1391,19 +1401,11 @@ impl Vr for OpenXr {
         );
         let center: Translation3<f32> = ((view_poses[0].1 + view_poses[1].1) / 2.0).into();
         let hmd_transform = center.to_homogeneous() * rotation_center.to_homogeneous();
-        let transform = match self.position_mode {
-            PositionMode::Hmd { distance } => {
-                let transform = hmd_transform
-                    * matrix![
-                        1.0, 0.0, 0.0, 0.0;
-                        0.0, 1.0, 0.0, 0.0;
-                        0.0, 0.0, 1.0, -distance;
-                        0.0, 0.0, 0.0, 1.0;
-                    ];
-                Affine3::from_matrix_unchecked(transform)
-            }
-            PositionMode::Absolute { transform } => transform,
-        };
+        if self.reposition {
+            self.position_mode.reposition(hmd_transform);
+            self.reposition = false;
+        }
+        let transform = self.position_mode.transform(hmd_transform);
         let overlay_posef = affine_to_posef(transform);
         if self.display_mode.projection_mode().is_some() {
             // Apply projection
@@ -1617,6 +1619,9 @@ impl Vr for OpenXr {
 
     fn set_position_mode(&mut self, mode: PositionMode) -> Result<(), Self::Error> {
         self.position_mode = mode;
+        if matches!(mode, PositionMode::Sticky { .. }) {
+            self.reposition = true;
+        }
         Ok(())
     }
 
