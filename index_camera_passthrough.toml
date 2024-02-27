@@ -4,10 +4,9 @@
 ## camera device to use. auto detect if not set
 camera_device = ""
 
-## which button should toggle the overlay visibility. press things
-## button on both controllers to toggle the overlay.
-## possible values: "Menu" | "Grip" | "Trigger" | "A" | "B"
-toggle_button = "Menu"
+## to open and close the overlay, you need to press two buttons on your
+## controller at the same time. which buttons are used can be configured
+## in SteamVR controller bindings
 
 ## how long does the button need to be held before the overlay open,
 ## closing the overlay is always instantaneous
