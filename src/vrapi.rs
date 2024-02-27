@@ -100,6 +100,7 @@ pub enum Action {
     Button1 = 0,
     Button2 = 1,
     Debug = 2,
+    Reposition = 3,
 }
 
 pub(crate) trait VkContext {
@@ -241,7 +242,7 @@ struct TextureState {
 pub(crate) struct OpenVr {
     sys: crate::openvr::VRSystem,
     handle: openvr_sys2::VROverlayHandle_t,
-    buttons: [openvr_sys2::VRActionHandle_t; 3],
+    buttons: [openvr_sys2::VRActionHandle_t; 4],
     action_set: openvr_sys2::VRActionSetHandle_t,
     texture: Option<TextureState>,
     camera_config: Option<StereoCamera>,
@@ -342,16 +343,13 @@ impl OpenVr {
                 .SetActionManifestPath(action_manifest.as_ptr())
         }
         .into_result()?;
-        let mut button = [const { MaybeUninit::uninit() }; 3];
+        let mut button = [const { MaybeUninit::uninit() }; 4];
         for i in 0..2 {
             let name = CString::new(format!("/actions/main/in/button{}", i + 1)).unwrap();
             unsafe {
                 input
                     .as_mut()
-                    .GetActionHandle(
-                        name.as_ptr(),
-                        MaybeUninit::slice_as_mut_ptr(&mut button[i..]),
-                    )
+                    .GetActionHandle(name.as_ptr(), button[i].as_mut_ptr())
                     .into_result()?;
             };
         }
@@ -359,12 +357,16 @@ impl OpenVr {
             let name = CString::new("/actions/main/in/debug").unwrap();
             input
                 .as_mut()
-                .GetActionHandle(
-                    name.as_ptr(),
-                    MaybeUninit::slice_as_mut_ptr(&mut button[2..]),
-                )
+                .GetActionHandle(name.as_ptr(), button[2].as_mut_ptr())
                 .into_result()?;
         }
+        unsafe {
+            let name = CString::new("/actions/main/in/reposition").unwrap();
+            input
+                .as_mut()
+                .GetActionHandle(name.as_ptr(), button[3].as_mut_ptr())
+                .into_result()?;
+        };
         let button = unsafe { MaybeUninit::array_assume_init(button) };
 
         log::debug!("buttons: {:?}", button);
@@ -907,6 +909,7 @@ pub(crate) struct OpenXr {
     action_button1: openxr::Action<bool>,
     action_button2: openxr::Action<bool>,
     action_debug: openxr::Action<bool>,
+    action_reposition: openxr::Action<bool>,
     camera_config: Option<StereoCamera>,
 
     session_state: openxr::SessionState,
@@ -1212,6 +1215,7 @@ impl OpenXr {
         let action_button1 = action_set.create_action("button1", "Button1", &[])?;
         let action_button2 = action_set.create_action("button2", "Button2", &[])?;
         let action_debug = action_set.create_action("debug", "Debug", &[])?;
+        let action_reposition = action_set.create_action("reposition", "Reposition", &[])?;
         instance.suggest_interaction_profile_bindings(
             instance.string_to_path("/interaction_profiles/htc/vive_controller")?,
             &[
@@ -1226,6 +1230,10 @@ impl OpenXr {
                 openxr::Binding::new(
                     &action_debug,
                     instance.string_to_path("/user/hand/left/input/trigger/click")?,
+                ),
+                openxr::Binding::new(
+                    &action_reposition,
+                    instance.string_to_path("/user/hand/right/input/trigger/click")?,
                 ),
             ],
         )?;
@@ -1244,6 +1252,10 @@ impl OpenXr {
                     &action_debug,
                     instance.string_to_path("/user/hand/left/input/trigger/click")?,
                 ),
+                openxr::Binding::new(
+                    &action_reposition,
+                    instance.string_to_path("/user/hand/right/input/a/click")?,
+                ),
             ],
         )?;
         instance.suggest_interaction_profile_bindings(
@@ -1261,6 +1273,10 @@ impl OpenXr {
                     &action_debug,
                     instance.string_to_path("/user/hand/left/input/select/click")?,
                 ),
+                openxr::Binding::new(
+                    &action_reposition,
+                    instance.string_to_path("/user/hand/right/input/select/click")?,
+                ),
             ],
         )?;
         let space =
@@ -1277,6 +1293,7 @@ impl OpenXr {
             action_button1,
             action_button2,
             action_debug,
+            action_reposition,
 
             action_set,
 
@@ -1660,6 +1677,9 @@ impl Vr for OpenXr {
                 .action_button2
                 .state(&self.session, openxr::Path::NULL)?,
             Action::Debug => self.action_debug.state(&self.session, openxr::Path::NULL)?,
+            Action::Reposition => self
+                .action_reposition
+                .state(&self.session, openxr::Path::NULL)?,
         }
         .current_state)
     }

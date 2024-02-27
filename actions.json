@@ -15,6 +15,10 @@
          "type" : "boolean"
       },
       {
+         "name" : "/actions/main/in/reposition",
+         "type" : "boolean"
+      },
+      {
          "name" : "/actions/main/in/debug",
          "type" : "boolean"
       }
@@ -38,6 +42,7 @@
          "/actions/main" : "Bindings",
          "/actions/main/in/button1" : "Button 1",
          "/actions/main/in/button2" : "Button 2",
+         "/actions/main/in/reposition" : "Reposition",
          "/actions/main/in/debug" : "Debug",
          "language_tag" : "en_US"
       }
