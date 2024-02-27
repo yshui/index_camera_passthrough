@@ -59,11 +59,8 @@ fn find_index_camera() -> Result<std::path::PathBuf> {
 static SPLASH_IMAGE: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/splash.png"));
 
 fn first_run(xdg: &BaseDirectories) -> Result<()> {
+    const ACTIONS_JSON : &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/actions.json"));
     const DATA_FILES: &[(&str, &str)] = &[
-        (
-            "actions.json",
-            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/actions.json")),
-        ),
         (
             "vive_controller_bindings.json",
             include_str!(concat!(
@@ -94,10 +91,13 @@ fn first_run(xdg: &BaseDirectories) -> Result<()> {
     if !config.exists() {
         std::fs::write(&config, DEFAULT_CONFIG)?;
     }
+    let actions: serde_json::Value = serde_json::from_str(ACTIONS_JSON)?;
+    std::fs::write(xdg.place_data_file("actions.json")?, actions.to_string())?;
     for (name, data) in DATA_FILES {
         let path = xdg.place_data_file(name)?;
         if !path.exists() {
-            std::fs::write(&path, data)?;
+            let obj :serde_json::Value = serde_json::from_str(data)?;
+            std::fs::write(&path, obj.to_string())?;
         }
     }
     Ok(())
