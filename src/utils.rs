@@ -5,9 +5,12 @@ use vulkano::{
     device::Device,
     image::{sys::RawImage, AllocateImageError, Image, ImageCreateFlags, ImageCreateInfo},
     memory::{
-        allocator::{FreeListAllocator, GenericMemoryAllocator, GenericMemoryAllocatorCreateInfo, MemoryAllocator, MemoryAllocatorError, MemoryTypeFilter},
-        DedicatedAllocation, DeviceMemory, MemoryAllocateInfo, MemoryMapInfo, MemoryRequirements,
-        ResourceMemory,
+        allocator::{
+            FreeListAllocator, GenericMemoryAllocator, GenericMemoryAllocatorCreateInfo,
+            MemoryAllocator, MemoryAllocatorError, MemoryTypeFilter,
+        },
+        DedicatedAllocation, DeviceMemory, MemoryAllocateInfo, MemoryMapInfo, MemoryPropertyFlags,
+        MemoryRequirements, ResourceMemory,
     },
     Validated,
 };
@@ -146,7 +149,10 @@ impl DeviceExt for Device {
             .map(|memory_type| {
                 if memory_type
                     .property_flags
-                    .contains(vulkano::memory::MemoryPropertyFlags::HOST_VISIBLE)
+                    .contains(MemoryPropertyFlags::HOST_VISIBLE)
+                    && !memory_type.property_flags.intersects(
+                        MemoryPropertyFlags::DEVICE_COHERENT | MemoryPropertyFlags::RDMA_CAPABLE,
+                    )
                 {
                     1024 * 1024
                 } else {
