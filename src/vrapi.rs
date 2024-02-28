@@ -259,6 +259,8 @@ pub(crate) struct OpenVr {
     cmdbuf_allocator: Arc<StandardCommandBufferAllocator>,
     descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
     render_texture: Option<Arc<vulkano::image::Image>>,
+    double_buffer: [Arc<vulkano::image::Image>; 2],
+    texture_in_use: u64,
     ipd: Option<f32>,
 }
 impl OpenVr {
@@ -405,11 +407,15 @@ impl OpenVr {
             overlay_transform: Matrix4::identity(),
             camera_config: None,
             instance,
-            device,
             allocator,
             descriptor_set_allocator,
             queue,
             cmdbuf_allocator,
+            double_buffer: [0, 1].map(|_| {
+                crate::create_submittable_image(device.clone()).expect("create_submittable_image")
+            }),
+            texture_in_use: 1,
+            device,
             render_texture: None,
             ipd: None,
         })
@@ -651,7 +657,8 @@ impl Vr for OpenVr {
         // log::debug!("get_render_texture");
         if self.display_mode.projection_mode().is_none() {
             assert!(self.render_texture.is_none());
-            self.render_texture = Some(crate::create_submittable_image(self.device.clone())?);
+            self.render_texture =
+                Some(self.double_buffer[(self.texture_in_use ^ 1) as usize].clone());
         }
         assert!(self.render_texture.is_some());
         Ok(self.render_texture.clone())
@@ -673,7 +680,7 @@ impl Vr for OpenVr {
             self.set_overlay_transformation(transform)?;
         }
         let output = if self.display_mode.projection_mode().is_some() {
-            let new_texture = crate::create_submittable_image(self.device.clone())?;
+            let new_texture = self.double_buffer[(self.texture_in_use ^ 1) as usize].clone();
             let eye_to_head = self.eye_to_head();
             let view_transforms = eye_to_head.map(|m| hmd_transform * m);
             let ipd = self.ipd()?;
@@ -734,13 +741,15 @@ impl Vr for OpenVr {
             eType: openvr_sys2::ETextureType::TextureType_Vulkan,
             eColorSpace: openvr_sys2::EColorSpace::ColorSpace_Auto,
         };
-        unsafe {
+        let ret = unsafe {
             vroverlay
                 .pin_mut()
                 .SetOverlayTexture(self.handle, &vrtexture)
                 .into_result()
                 .map_err(Into::into)
-        }
+        };
+        self.texture_in_use ^= 1;
+        ret
     }
     fn is_synchronized(&self) -> bool {
         false

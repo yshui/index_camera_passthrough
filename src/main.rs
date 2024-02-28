@@ -25,7 +25,7 @@ use anyhow::{anyhow, Context, Result};
 use v4l::video::Capture;
 use vulkano::{
     image::{AllocateImageError, Image, ImageCreateInfo, ImageUsage},
-    memory::allocator::{AllocationCreateInfo, MemoryAllocator, MemoryTypeFilter},
+    memory::allocator::MemoryTypeFilter,
     sync::GpuFuture,
     Validated,
 };
