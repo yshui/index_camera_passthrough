@@ -1033,11 +1033,12 @@ impl OpenXr {
             .position(|qf| qf.queue_flags.contains(QueueFlags::GRAPHICS))
             .ok_or(OpenXrError::NoGraphicsQueue)?;
         log::debug!("queue family: {queue_family}");
+        let queue_create_info = ash::vk::DeviceQueueCreateInfo::builder()
+            .queue_family_index(queue_family as u32)
+            .queue_priorities(std::slice::from_ref(&1.0))
+            .build();
         let create_info = ash::vk::DeviceCreateInfo::builder()
-            .queue_create_infos(&[ash::vk::DeviceQueueCreateInfo::builder()
-                .queue_family_index(queue_family as u32)
-                .queue_priorities(&[1.0])
-                .build()])
+            .queue_create_infos(std::slice::from_ref(&queue_create_info))
             .build();
         let vulkano_create_info = vulkano::device::DeviceCreateInfo {
             queue_create_infos: vec![QueueCreateInfo {
