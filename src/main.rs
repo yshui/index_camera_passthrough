@@ -14,6 +14,7 @@ mod openvr;
 mod pipeline;
 mod projection;
 mod steam;
+mod utils;
 mod vrapi;
 mod yuv;
 
@@ -34,7 +35,7 @@ const CAMERA_SIZE: u32 = 960;
 #[allow(unused_imports)]
 use log::info;
 
-use crate::{config::Backend, pipeline::submit_cpu_image, vrapi::VrExt};
+use crate::{config::Backend, vrapi::VrExt};
 
 static APP_KEY: &str = "index_camera_passthrough_rs\0";
 static APP_NAME: &str = "Camera\0";
@@ -59,7 +60,7 @@ fn find_index_camera() -> Result<std::path::PathBuf> {
 static SPLASH_IMAGE: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/splash.png"));
 
 fn first_run(xdg: &BaseDirectories) -> Result<()> {
-    const ACTIONS_JSON : &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/actions.json"));
+    const ACTIONS_JSON: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/actions.json"));
     const DATA_FILES: &[(&str, &str)] = &[
         (
             "vive_controller_bindings.json",
@@ -96,7 +97,7 @@ fn first_run(xdg: &BaseDirectories) -> Result<()> {
     for (name, data) in DATA_FILES {
         let path = xdg.place_data_file(name)?;
         if !path.exists() {
-            let obj :serde_json::Value = serde_json::from_str(data)?;
+            let obj: serde_json::Value = serde_json::from_str(data)?;
             std::fs::write(&path, obj.to_string())?;
         }
     }
@@ -405,10 +406,9 @@ fn main() -> Result<()> {
                 // Allocate final image
                 if let Some(output) = vrsys.get_render_texture()? {
                     if current_frame.bypass_pipeline {
-                        let future = submit_cpu_image(
+                        let future = pipeline.submit_cpu_image(
                             &current_frame.frame,
                             vrsys.vk_command_buffer_allocator(),
-                            vrsys.vk_allocator(),
                             &queue,
                             output,
                         )?;

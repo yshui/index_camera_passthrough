@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
+use crate::utils::DeviceExt as _;
 use anyhow::Result;
 use vulkano::{
-    buffer::{Buffer, BufferCreateInfo, BufferUsage},
+    buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer},
     command_buffer::{
         allocator::CommandBufferAllocator, CommandBufferBeginInfo, CommandBufferLevel,
         CommandBufferUsage, CopyBufferToImageInfo, RecordingCommandBuffer,
@@ -11,7 +12,7 @@ use vulkano::{
     device::{Device, DeviceOwned},
     format::Format,
     image::{Image as VkImage, ImageCreateInfo, ImageUsage},
-    memory::allocator::{AllocationCreateInfo, MemoryAllocator, MemoryTypeFilter},
+    memory::allocator::{MemoryAllocator, MemoryTypeFilter},
     sync::GpuFuture,
     Handle, VulkanObject,
 };
@@ -21,6 +22,7 @@ pub(crate) struct Pipeline {
     correction: Option<crate::distortion_correction::StereoCorrection>,
     capture: bool,
     render_doc: Option<renderdoc::RenderDoc<renderdoc::V100>>,
+    cpu_image_buffer: Arc<Buffer>,
     yuv_texture: Arc<VkImage>,
     textures: [Arc<VkImage>; 2],
     camera_config: Option<crate::vrapi::StereoCamera>,
@@ -44,41 +46,6 @@ impl std::fmt::Debug for Pipeline {
 }
 
 use crate::CAMERA_SIZE;
-
-pub(crate) fn submit_cpu_image(
-    img: &[u8],
-    cmdbuf_allocator: Arc<dyn CommandBufferAllocator>,
-    allocator: Arc<dyn MemoryAllocator>,
-    queue: &Arc<vulkano::device::Queue>,
-    output: Arc<VkImage>,
-) -> Result<impl GpuFuture> {
-    let buffer = Buffer::new_slice::<u8>(
-        allocator,
-        BufferCreateInfo {
-            usage: BufferUsage::TRANSFER_SRC,
-            ..Default::default()
-        },
-        AllocationCreateInfo {
-            memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE
-                | MemoryTypeFilter::PREFER_DEVICE,
-            allocate_preference: vulkano::memory::allocator::MemoryAllocatePreference::Unknown,
-            ..Default::default()
-        },
-        img.len() as u64,
-    )?;
-    buffer.write()?.copy_from_slice(img);
-    let mut cmdbuf = RecordingCommandBuffer::new(
-        cmdbuf_allocator,
-        queue.queue_family_index(),
-        CommandBufferLevel::Primary,
-        CommandBufferBeginInfo {
-            usage: CommandBufferUsage::OneTimeSubmit,
-            ..Default::default()
-        },
-    )?;
-    cmdbuf.copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(buffer, output))?;
-    Ok(cmdbuf.end()?.execute(queue.clone())?)
-}
 
 enum EitherGpuFuture<L, R> {
     Left(L),
@@ -200,6 +167,28 @@ unsafe impl<L: GpuFuture, R: GpuFuture> GpuFuture for EitherGpuFuture<L, R> {
 }
 
 impl Pipeline {
+    pub(crate) fn submit_cpu_image(
+        &self,
+        img: &[u8],
+        cmdbuf_allocator: Arc<dyn CommandBufferAllocator>,
+        queue: &Arc<vulkano::device::Queue>,
+        output: Arc<VkImage>,
+    ) -> Result<impl GpuFuture> {
+        let buffer = Subbuffer::new(self.cpu_image_buffer.clone()).slice(0..img.len() as u64);
+        buffer.write()?.copy_from_slice(img);
+        let mut cmdbuf = RecordingCommandBuffer::new(
+            cmdbuf_allocator,
+            queue.queue_family_index(),
+            CommandBufferLevel::Primary,
+            CommandBufferBeginInfo {
+                usage: CommandBufferUsage::OneTimeSubmit,
+                ..Default::default()
+            },
+        )?;
+        cmdbuf.copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(buffer, output))?;
+        Ok(cmdbuf.end()?.execute(queue.clone())?)
+    }
+
     /// Create post-processing stages
     ///
     /// Camera data -> upload -> internal texture
@@ -213,9 +202,12 @@ impl Pipeline {
         source_is_yuv: bool,
         camera_config: Option<crate::vrapi::StereoCamera>,
     ) -> Result<Self> {
+        let render_doc = renderdoc::RenderDoc::new().ok();
+        if render_doc.is_some() {
+            log::info!("RenderDoc loaded");
+        }
         // Allocate intermediate textures
-        let yuv_texture = VkImage::new(
-            allocator.clone(),
+        let yuv_texture = device.clone().new_image(
             ImageCreateInfo {
                 extent: [CAMERA_SIZE, CAMERA_SIZE, 1],
                 format: Format::R8G8B8A8_UNORM,
@@ -225,26 +217,18 @@ impl Pipeline {
                     | ImageUsage::COLOR_ATTACHMENT,
                 ..Default::default()
             },
-            AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE
-                    | MemoryTypeFilter::PREFER_DEVICE,
-                ..Default::default()
-            },
+            MemoryTypeFilter::HOST_SEQUENTIAL_WRITE | MemoryTypeFilter::PREFER_DEVICE,
         )?;
         device.set_debug_utils_object_name(&yuv_texture, Some("yuv_texture"))?;
         let textures = [0, 1].try_map(|id| {
-            let tex = VkImage::new(
-                allocator.clone(),
+            let tex = device.clone().new_image(
                 ImageCreateInfo {
                     extent: [CAMERA_SIZE * 2, CAMERA_SIZE, 1],
                     format: Format::R8G8B8A8_UNORM,
                     usage: ImageUsage::SAMPLED | ImageUsage::COLOR_ATTACHMENT,
                     ..Default::default()
                 },
-                AllocationCreateInfo {
-                    memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
-                    ..Default::default()
-                },
+                MemoryTypeFilter::PREFER_DEVICE,
             )?;
             device.set_debug_utils_object_name(&tex, Some(&format!("texture{id}")))?;
             anyhow::Ok(tex)
@@ -275,16 +259,22 @@ impl Pipeline {
                 )
             })
             .transpose()?;
+        let cpu_buffer = device.clone().new_buffer(
+            BufferCreateInfo {
+                usage: BufferUsage::TRANSFER_SRC,
+                // This should be more than enough. Camera sources are YUV subsampled,
+                // so it won't be 4 bytes per pixel.
+                size: CAMERA_SIZE as u64 * CAMERA_SIZE as u64 * 2 * 4,
+                ..Default::default()
+            },
+            MemoryTypeFilter::HOST_SEQUENTIAL_WRITE | MemoryTypeFilter::PREFER_DEVICE,
+        )?;
         log::debug!("correction fov: {:?}", correction.as_ref().map(|x| x.fov()));
         let fov = correction
             .as_ref()
             .map(|c| c.fov())
             .unwrap_or([[1.19; 2]; 2]); // default to roughly 100 degrees fov, hopefully this is sensible
         log::info!("Adjusted FOV: {:?}", fov);
-        let render_doc = renderdoc::RenderDoc::new().ok();
-        if render_doc.is_some() {
-            log::info!("RenderDoc loaded");
-        }
         Ok(Self {
             correction,
             yuv: converter,
@@ -293,6 +283,7 @@ impl Pipeline {
             textures,
             yuv_texture,
             camera_config,
+            cpu_image_buffer: cpu_buffer,
         })
     }
     pub fn fov(&self) -> [[f32; 2]; 2] {
@@ -329,10 +320,9 @@ impl Pipeline {
             output.clone()
         };
         let future = if let Some(converter) = &self.yuv {
-            let future = submit_cpu_image(
+            let future = self.submit_cpu_image(
                 input,
                 cmdbuf_allocator.clone(),
-                allocator.clone(),
                 queue,
                 self.yuv_texture.clone(),
             )?;
@@ -345,13 +335,8 @@ impl Pipeline {
             )?;
             EitherGpuFuture::Left(future)
         } else {
-            let future = submit_cpu_image(
-                input,
-                cmdbuf_allocator.clone(),
-                allocator.clone(),
-                queue,
-                texture.clone(),
-            )?;
+            let future =
+                self.submit_cpu_image(input, cmdbuf_allocator.clone(), queue, texture.clone())?;
             EitherGpuFuture::Right(future)
         };
         future.flush()?;
