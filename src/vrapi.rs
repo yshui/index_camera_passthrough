@@ -651,7 +651,7 @@ impl Vr for OpenVr {
         // log::debug!("get_render_texture");
         if self.display_mode.projection_mode().is_none() {
             assert!(self.render_texture.is_none());
-            self.render_texture = Some(crate::create_submittable_image(self.allocator.clone())?);
+            self.render_texture = Some(crate::create_submittable_image(self.device.clone())?);
         }
         assert!(self.render_texture.is_some());
         Ok(self.render_texture.clone())
@@ -673,7 +673,7 @@ impl Vr for OpenVr {
             self.set_overlay_transformation(transform)?;
         }
         let output = if self.display_mode.projection_mode().is_some() {
-            let new_texture = crate::create_submittable_image(self.allocator.clone())?;
+            let new_texture = crate::create_submittable_image(self.device.clone())?;
             let eye_to_head = self.eye_to_head();
             let view_transforms = eye_to_head.map(|m| hmd_transform * m);
             let ipd = self.ipd()?;
@@ -756,8 +756,7 @@ impl Vr for OpenVr {
         if let Some(projection_mode) = self.display_mode.projection_mode() {
             let camera_calib = self.load_camera_paramter();
             if self.projector.is_none() {
-                self.render_texture =
-                    Some(crate::create_submittable_image(self.allocator.clone())?);
+                self.render_texture = Some(crate::create_submittable_image(self.device.clone())?);
                 let mut projector = crate::projection::Projection::new(
                     self.device.clone(),
                     self.allocator.clone(),
@@ -1546,8 +1545,7 @@ impl Vr for OpenXr {
         if let Some(projection_mode) = self.display_mode.projection_mode() {
             let camera_calib = self.load_camera_paramter();
             if self.projector.is_none() {
-                self.render_texture =
-                    Some(crate::create_submittable_image(self.allocator.clone())?);
+                self.render_texture = Some(crate::create_submittable_image(self.device.clone())?);
                 let mut projector = crate::projection::Projection::new(
                     self.device.clone(),
                     self.allocator.clone(),

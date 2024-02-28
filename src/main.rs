@@ -105,10 +105,10 @@ fn first_run(xdg: &BaseDirectories) -> Result<()> {
 }
 
 fn create_submittable_image(
-    allocator: Arc<dyn MemoryAllocator>,
+    device: Arc<vulkano::device::Device>,
 ) -> Result<Arc<Image>, Validated<AllocateImageError>> {
-    Image::new(
-        allocator,
+    use crate::utils::DeviceExt;
+    device.new_image(
         ImageCreateInfo {
             extent: [CAMERA_SIZE * 2, CAMERA_SIZE, 1],
             format: vulkano::format::Format::R8G8B8A8_UNORM,
@@ -119,10 +119,7 @@ fn create_submittable_image(
             mip_levels: 1,
             ..Default::default()
         },
-        AllocationCreateInfo {
-            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
-            ..Default::default()
-        },
+        MemoryTypeFilter::PREFER_DEVICE,
     )
 }
 
