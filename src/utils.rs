@@ -2,11 +2,10 @@ use std::sync::Arc;
 
 use vulkano::{
     buffer::{AllocateBufferError, Buffer, BufferCreateInfo, RawBuffer},
-    command_buffer::ResourceUseRef,
     device::Device,
     image::{sys::RawImage, AllocateImageError, Image, ImageCreateFlags, ImageCreateInfo},
     memory::{
-        allocator::{MemoryAllocatorError, MemoryTypeFilter},
+        allocator::{FreeListAllocator, GenericMemoryAllocator, GenericMemoryAllocatorCreateInfo, MemoryAllocator, MemoryAllocatorError, MemoryTypeFilter},
         DedicatedAllocation, DeviceMemory, MemoryAllocateInfo, MemoryMapInfo, MemoryRequirements,
         ResourceMemory,
     },
@@ -14,6 +13,7 @@ use vulkano::{
 };
 
 pub(crate) trait DeviceExt {
+    type HostToDeviceAllocator: MemoryAllocator;
     fn new_image(
         self: Arc<Self>,
         create_info: ImageCreateInfo,
@@ -24,6 +24,10 @@ pub(crate) trait DeviceExt {
         create_info: BufferCreateInfo,
         filter: MemoryTypeFilter,
     ) -> Result<Arc<Buffer>, Validated<AllocateBufferError>>;
+
+    /// An allocator used to allocate a small amount of memory intended for host-to-device upload,
+    /// e.g. small vertex buffers, uniform buffers, etc.
+    fn host_to_device_allocator(self: Arc<Self>) -> Self::HostToDeviceAllocator;
 }
 
 fn dedicated_allocation_memory_requirements(
@@ -94,6 +98,7 @@ fn allocate_dedicated(
 }
 
 impl DeviceExt for Device {
+    type HostToDeviceAllocator = GenericMemoryAllocator<FreeListAllocator>;
     fn new_image(
         self: Arc<Self>,
         create_info: ImageCreateInfo,
@@ -130,5 +135,38 @@ impl DeviceExt for Device {
         unsafe { buffer.bind_memory(resource_memory) }
             .map_err(|(x, _, _)| x.map(AllocateBufferError::BindMemory))
             .map(Arc::new)
+    }
+    fn host_to_device_allocator(self: Arc<Self>) -> Self::HostToDeviceAllocator {
+        // Find a memory type suitable for host-to-device upload.
+        let block_sizes: Vec<_> = self
+            .physical_device()
+            .memory_properties()
+            .memory_types
+            .iter()
+            .map(|memory_type| {
+                if memory_type
+                    .property_flags
+                    .contains(vulkano::memory::MemoryPropertyFlags::HOST_VISIBLE)
+                {
+                    1024 * 1024
+                } else {
+                    0
+                }
+            })
+            .collect();
+        let memory_type_bits = block_sizes
+            .iter()
+            .enumerate()
+            .map(|(index, &size)| if size != 0 { 1 << index } else { 0 })
+            .sum();
+        log::debug!("host_to_device_allocator: block_sizes={block_sizes:?}, memory_type_bits={memory_type_bits:#b}");
+        GenericMemoryAllocator::new(
+            self.clone(),
+            GenericMemoryAllocatorCreateInfo {
+                block_sizes: &block_sizes,
+                memory_type_bits,
+                ..Default::default()
+            },
+        )
     }
 }

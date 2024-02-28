@@ -1,5 +1,5 @@
 use itertools::Itertools;
-use nalgebra::{matrix, Affine3, Matrix3, Matrix4, Translation3, UnitQuaternion, Vector3};
+use nalgebra::{Affine3, Matrix3, Matrix4, Translation3, UnitQuaternion, Vector3};
 use openvr_sys2::{ETrackedPropertyError, EVRInitError, EVRInputError, EVROverlayError};
 use openxr::{
     ApplicationInfo, EnvironmentBlendMode, EventDataBuffer, Extent2Df, Extent2Di, EyeVisibility,
@@ -35,6 +35,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     config::{DisplayMode, Eye, PositionMode},
+    utils::DeviceExt,
     APP_KEY, APP_NAME, CAMERA_SIZE,
 };
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
@@ -382,7 +383,7 @@ impl OpenVr {
         log::debug!("action_set: {:?}", action_set);
         let instance = Self::create_vk_instance()?;
         let (device, queue) = Self::create_vk_device(&sys, &instance)?;
-        let allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
+        let allocator = Arc::new(device.clone().host_to_device_allocator());
         let descriptor_set_allocator = Arc::new(StandardDescriptorSetAllocator::new(
             device.clone(),
             StandardDescriptorSetAllocatorCreateInfo::default(),
@@ -1139,7 +1140,7 @@ impl OpenXr {
         }
         let vk_instance = Self::create_vk_instance(&instance, system)?;
         let (device, queue) = Self::create_vk_device(&instance, system, &vk_instance)?;
-        let allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
+        let allocator = Arc::new(device.clone().host_to_device_allocator());
         let cmdbuf_allocator = Arc::new(StandardCommandBufferAllocator::new(
             device.clone(),
             Default::default(),
