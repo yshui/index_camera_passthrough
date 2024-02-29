@@ -939,6 +939,7 @@ pub(crate) struct OpenXr {
     frame_state: Option<openxr::FrameState>,
     space: openxr::Space,
     saved_poses: [(UnitQuaternion<f32>, Vector3<f32>); 2],
+    saved_overlay_pose: Option<openxr::Posef>,
 
     device: Arc<Device>,
     queue: Arc<Queue>,
@@ -1122,6 +1123,66 @@ impl OpenXr {
             Instance::from_handle(get_vulkan_library().clone(), instance, vulkano_create_info)
         })
     }
+
+    fn composition_layers<'a>(
+        saved_overlay_pose: &'a Option<openxr::Posef>,
+        swapchain: &'a openxr::Swapchain<openxr::Vulkan>,
+        space: &'a openxr::Space,
+        is_stereo: bool,
+    ) -> Option<(
+        openxr::CompositionLayerQuad<'a, openxr::Vulkan>,
+        openxr::CompositionLayerQuad<'a, openxr::Vulkan>,
+    )> {
+        saved_overlay_pose.map(|overlay_posef| {
+            let left = openxr::CompositionLayerQuad::<openxr::Vulkan>::new()
+                .eye_visibility(EyeVisibility::LEFT)
+                .pose(overlay_posef)
+                .sub_image(
+                    SwapchainSubImage::new()
+                        .swapchain(swapchain)
+                        .image_rect(Rect2Di {
+                            offset: Offset2Di { x: 0, y: 0 },
+                            extent: Extent2Di {
+                                width: crate::CAMERA_SIZE as i32,
+                                height: crate::CAMERA_SIZE as i32,
+                            },
+                        }),
+                )
+                .space(space)
+                .size(Extent2Df {
+                    width: 1.0,
+                    height: 1.0,
+                });
+            let right = openxr::CompositionLayerQuad::<openxr::Vulkan>::new()
+                .eye_visibility(EyeVisibility::RIGHT)
+                .pose(overlay_posef)
+                .sub_image(
+                    SwapchainSubImage::new()
+                        .swapchain(swapchain)
+                        .image_rect(Rect2Di {
+                            offset: Offset2Di {
+                                x: if is_stereo {
+                                    crate::CAMERA_SIZE as i32
+                                } else {
+                                    0
+                                },
+                                y: 0,
+                            },
+                            extent: Extent2Di {
+                                width: crate::CAMERA_SIZE as i32,
+                                height: crate::CAMERA_SIZE as i32,
+                            },
+                        }),
+                )
+                .space(space)
+                .size(Extent2Df {
+                    width: 1.0,
+                    height: 1.0,
+                });
+            (left, right)
+        })
+    }
+
     pub(crate) fn new(placement: u32) -> Result<Self, OpenXrError> {
         let entry = unsafe { openxr::Entry::load()? };
         let mut extension = openxr::ExtensionSet::default();
@@ -1326,6 +1387,7 @@ impl OpenXr {
             frame_state: None,
             space,
             saved_poses: [Default::default(); 2],
+            saved_overlay_pose: None,
 
             allocator,
             descriptor_set_allocator,
@@ -1417,6 +1479,7 @@ impl Vr for OpenXr {
         }
         let transform = self.position_mode.transform(hmd_transform);
         let overlay_posef = affine_to_posef(transform);
+        self.saved_overlay_pose = Some(overlay_posef);
         if self.display_mode.projection_mode().is_some() {
             // Apply projection
             let image = self.swapchain.acquire_image()? as usize;
@@ -1445,51 +1508,13 @@ impl Vr for OpenXr {
             self.render_texture.take();
         }
         self.swapchain.release_image()?;
-        let left = openxr::CompositionLayerQuad::<openxr::Vulkan>::new()
-            .eye_visibility(EyeVisibility::LEFT)
-            .pose(overlay_posef)
-            .sub_image(
-                SwapchainSubImage::new()
-                    .swapchain(&self.swapchain)
-                    .image_rect(Rect2Di {
-                        offset: Offset2Di { x: 0, y: 0 },
-                        extent: Extent2Di {
-                            width: crate::CAMERA_SIZE as i32,
-                            height: crate::CAMERA_SIZE as i32,
-                        },
-                    }),
-            )
-            .space(&self.space)
-            .size(Extent2Df {
-                width: 1.0,
-                height: 1.0,
-            });
-        let right = openxr::CompositionLayerQuad::<openxr::Vulkan>::new()
-            .eye_visibility(EyeVisibility::RIGHT)
-            .pose(overlay_posef)
-            .sub_image(
-                SwapchainSubImage::new()
-                    .swapchain(&self.swapchain)
-                    .image_rect(Rect2Di {
-                        offset: Offset2Di {
-                            x: if self.display_mode.is_stereo() {
-                                crate::CAMERA_SIZE as i32
-                            } else {
-                                0
-                            },
-                            y: 0,
-                        },
-                        extent: Extent2Di {
-                            width: crate::CAMERA_SIZE as i32,
-                            height: crate::CAMERA_SIZE as i32,
-                        },
-                    }),
-            )
-            .space(&self.space)
-            .size(Extent2Df {
-                width: 1.0,
-                height: 1.0,
-            });
+        let (left, right) = Self::composition_layers(
+            &self.saved_overlay_pose,
+            &self.swapchain,
+            &self.space,
+            self.display_mode.is_stereo(),
+        )
+        .unwrap();
         self.frame_stream.end(
             frame_state.predicted_display_time,
             EnvironmentBlendMode::OPAQUE,
@@ -1513,11 +1538,24 @@ impl Vr for OpenXr {
         log::trace!("refresh");
         let frame_state = self.frame_state.insert(self.frame_waiter.wait()?);
         self.frame_stream.begin()?;
-        self.frame_stream.end(
-            frame_state.predicted_display_time,
-            EnvironmentBlendMode::OPAQUE,
-            &[],
-        )?;
+        if let Some((left, right)) = Self::composition_layers(
+            &self.saved_overlay_pose,
+            &self.swapchain,
+            &self.space,
+            self.display_mode.is_stereo(),
+        ) {
+            self.frame_stream.end(
+                frame_state.predicted_display_time,
+                EnvironmentBlendMode::OPAQUE,
+                &[&left, &right],
+            )?;
+        } else {
+            self.frame_stream.end(
+                frame_state.predicted_display_time,
+                EnvironmentBlendMode::OPAQUE,
+                &[],
+            )?;
+        }
         Ok(())
     }
 
