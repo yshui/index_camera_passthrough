@@ -1531,7 +1531,6 @@ impl Vr for OpenXr {
         if self.session_state != openxr::SessionState::SYNCHRONIZED
             && self.session_state != openxr::SessionState::FOCUSED
             && self.session_state != openxr::SessionState::VISIBLE
-            && self.session_state != openxr::SessionState::READY
         {
             return Ok(());
         }
@@ -1563,7 +1562,6 @@ impl Vr for OpenXr {
         if self.session_state != openxr::SessionState::SYNCHRONIZED
             && self.session_state != openxr::SessionState::FOCUSED
             && self.session_state != openxr::SessionState::VISIBLE
-            && self.session_state != openxr::SessionState::READY
         {
             return Ok(None);
         }
@@ -1655,6 +1653,7 @@ impl Vr for OpenXr {
                 EnvironmentBlendMode::OPAQUE,
                 &[&empty],
             )?;
+            self.session_state = openxr::SessionState::READY;
             match self.session.end() {
                 Err(openxr::sys::Result::ERROR_SESSION_NOT_STOPPING) | Ok(_) => Ok(()),
                 Err(e) => Err(e.into()),
