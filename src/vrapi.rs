@@ -931,6 +931,7 @@ pub(crate) struct OpenXr {
     camera_config: Option<StereoCamera>,
 
     session_state: openxr::SessionState,
+    session_running: bool,
     session: openxr::Session<openxr::Vulkan>,
     frame_waiter: openxr::FrameWaiter,
     frame_stream: openxr::FrameStream<openxr::Vulkan>,
@@ -1379,6 +1380,7 @@ impl OpenXr {
             action_set,
 
             session_state: openxr::SessionState::IDLE,
+            session_running: false,
             session,
             frame_waiter,
             frame_stream,
@@ -1528,11 +1530,7 @@ impl Vr for OpenXr {
     }
 
     fn refresh(&mut self) -> Result<(), Self::Error> {
-        if self.session_state != openxr::SessionState::SYNCHRONIZED
-            && self.session_state != openxr::SessionState::FOCUSED
-            && self.session_state != openxr::SessionState::VISIBLE
-            && self.session_state != openxr::SessionState::READY
-        {
+        if !self.session_running {
             return Ok(());
         }
         log::trace!("refresh");
@@ -1560,11 +1558,7 @@ impl Vr for OpenXr {
     }
 
     fn get_render_texture(&mut self) -> Result<Option<Arc<Image>>, Self::Error> {
-        if self.session_state != openxr::SessionState::SYNCHRONIZED
-            && self.session_state != openxr::SessionState::FOCUSED
-            && self.session_state != openxr::SessionState::VISIBLE
-            && self.session_state != openxr::SessionState::READY
-        {
+        if !self.session_running {
             return Ok(None);
         }
         let frame_state = self.frame_state.insert(self.frame_waiter.wait()?);
@@ -1614,19 +1608,18 @@ impl Vr for OpenXr {
 
     fn show_overlay(&mut self) -> Result<(), Self::Error> {
         self.overlay_visible = true;
-        if self.session_state == openxr::SessionState::READY {
+        log::debug!("show overlay, {:?}", self.session_state);
+        if self.session_state == openxr::SessionState::READY && !self.session_running {
             self.session
                 .begin(openxr::ViewConfigurationType::PRIMARY_STEREO)?;
+            self.session_running = true;
         }
         Ok(())
     }
 
     fn hide_overlay(&mut self) -> Result<(), Self::Error> {
         self.overlay_visible = false;
-        if self.session_state != openxr::SessionState::EXITING
-            && self.session_state != openxr::SessionState::IDLE
-            && self.session_state != openxr::SessionState::STOPPING
-        {
+        if self.session_running {
             // HACK!: show a zero sized quad to hide the overlay. It's a bit ugly we
             // blocks the mainloop here to wait for a frame
             let frame_state = self.frame_waiter.wait()?;
@@ -1655,6 +1648,8 @@ impl Vr for OpenXr {
                 EnvironmentBlendMode::OPAQUE,
                 &[&empty],
             )?;
+            self.session_state = openxr::SessionState::READY;
+            self.session_running = false;
             match self.session.end() {
                 Err(openxr::sys::Result::ERROR_SESSION_NOT_STOPPING) | Ok(_) => Ok(()),
                 Err(e) => Err(e.into()),
@@ -1695,8 +1690,10 @@ impl Vr for OpenXr {
                         }
                         SessionState::READY => {
                             if self.overlay_visible {
+                                log::debug!("begin session");
                                 self.session
                                     .begin(openxr::ViewConfigurationType::PRIMARY_STEREO)?;
+                                self.session_running = true;
                             }
                         }
                         SessionState::STOPPING => {
