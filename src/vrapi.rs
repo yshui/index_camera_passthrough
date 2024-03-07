@@ -1614,9 +1614,13 @@ impl Vr for OpenXr {
                 .session
                 .begin(openxr::ViewConfigurationType::PRIMARY_STEREO)
             {
-                Ok(_) | Err(openxr::sys::Result::ERROR_SESSION_RUNNING) => (), // HACK: workaround monado bug?
-                Err(e) => return Err(e.into()),
-            }
+                Err(openxr::sys::Result::ERROR_SESSION_RUNNING) => {
+                    // HACK: workaround monado bug?
+                    log::debug!("ignoring ERROR_SESSION_RUNNING");
+                    Ok(openxr::sys::Result::SUCCESS)
+                }
+                r @ _ => r,
+            }?;
             self.session_running = true;
         }
         Ok(())
@@ -1656,9 +1660,13 @@ impl Vr for OpenXr {
             self.session_state = openxr::SessionState::READY;
             self.session_running = false;
             match self.session.end() {
-                Err(openxr::sys::Result::ERROR_SESSION_NOT_STOPPING) | Ok(_) => Ok(()),
-                Err(e) => Err(e.into()),
-            }
+                Err(openxr::sys::Result::ERROR_SESSION_NOT_STOPPING) => {
+                    log::debug!("ignoring ERROR_SESSION_NOT_STOPPING");
+                    Ok(openxr::sys::Result::SUCCESS)
+                }
+                r @ _ => r,
+            }?;
+            Ok(())
         } else {
             Ok(())
         }
