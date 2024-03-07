@@ -5,7 +5,7 @@
   };
   inputs.rust-manifest = {
     flake = false;
-    url = "https://static.rust-lang.org/dist/channel-rust-nightly.toml";
+    url = "https://static.rust-lang.org/dist/2024-03-02/channel-rust-nightly.toml";
   };
   description = "index_camera_passthrough";
 
@@ -21,7 +21,7 @@
     ];
   in with pkgs; {
     devShells.${system}.default = mkShell {
-      nativeBuildInputs = [ pkg-config cmake rust-toolchain ];
+      nativeBuildInputs = [ pkg-config cmake rust-toolchain cargo-bloat ];
       buildInputs = [ systemdLibs linuxHeaders openvr ];
       shellHook = ''
         export LD_LIBRARY_PATH="${lib.makeLibraryPath [ libglvnd vulkan-loader ]}:$LD_LIBRARY_PATH"
