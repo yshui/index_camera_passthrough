@@ -1610,8 +1610,13 @@ impl Vr for OpenXr {
         self.overlay_visible = true;
         log::debug!("show overlay, {:?}", self.session_state);
         if self.session_state == openxr::SessionState::READY && !self.session_running {
-            self.session
-                .begin(openxr::ViewConfigurationType::PRIMARY_STEREO)?;
+            match self
+                .session
+                .begin(openxr::ViewConfigurationType::PRIMARY_STEREO)
+            {
+                Ok(_) | Err(openxr::sys::Result::ERROR_SESSION_RUNNING) => (), // HACK: workaround monado bug?
+                Err(e) => return Err(e.into()),
+            }
             self.session_running = true;
         }
         Ok(())
