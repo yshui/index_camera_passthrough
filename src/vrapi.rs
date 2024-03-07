@@ -1614,7 +1614,7 @@ impl Vr for OpenXr {
                 .session
                 .begin(openxr::ViewConfigurationType::PRIMARY_STEREO)
             {
-                Err(openxr::sys::Result::ERROR_SESSION_RUNNING) => (), // HACK: workaround monado bug?
+                Ok(_) | Err(openxr::sys::Result::ERROR_SESSION_RUNNING) => (), // HACK: workaround monado bug?
                 Err(e) => return Err(e.into()),
             }
             self.session_running = true;
