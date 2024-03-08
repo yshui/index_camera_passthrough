@@ -295,7 +295,9 @@ fn main() -> Result<()> {
     let cfg = config::load_config(&xdg)?;
     let env =
         env_logger::Env::default().default_filter_or(if cfg.debug { "debug" } else { "info" });
-    env_logger::init_from_env(env);
+    env_logger::Builder::from_env(env)
+        .format_timestamp_millis()
+        .init();
     let camera = v4l::Device::with_path(if cfg.camera_device.is_empty() {
         find_index_camera()?
     } else {
@@ -370,6 +372,9 @@ fn main() -> Result<()> {
     log::debug!("showing overlay");
     vrsys.show_overlay()?;
     app_state.start_capture();
+    log::debug!("waiting for ready");
+    vrsys.wait_for_ready()?;
+    log::debug!("VR runtime ready");
 
     // TODO: don't hardcode this
     struct AppConfig {
@@ -421,7 +426,7 @@ fn main() -> Result<()> {
                 .unwrap_or_default();
             log::trace!("elapsed: {elapsed:?}");
             // Allocate final image
-            log::debug!("frame bypass pipeline: {}", current_frame.bypass_pipeline);
+            log::trace!("frame bypass pipeline: {}", current_frame.bypass_pipeline);
             // Display mode must be known before we call `get_render_texture`.
             if current_frame.bypass_pipeline {
                 vrsys.set_display_mode(config::DisplayMode::Direct)?;

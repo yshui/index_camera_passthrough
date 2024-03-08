@@ -149,6 +149,9 @@ pub(crate) trait Vr: VkContext {
     fn poll_next_event(&mut self) -> Result<Option<Event>, Self::Error>;
     fn update_action_state(&mut self) -> Result<(), Self::Error>;
     fn get_action_state(&self, action: Action) -> Result<bool, Self::Error>;
+    fn wait_for_ready(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
 }
 
 struct VrMapError<T, F>(T, F);
@@ -218,6 +221,9 @@ impl<T: Vr, E: Send + Sync + 'static, F: Fn(<T as Vr>::Error) -> E> Vr for VrMap
     }
     fn update_action_state(&mut self) -> Result<(), Self::Error> {
         self.0.update_action_state().map_err(&self.1)
+    }
+    fn wait_for_ready(&mut self) -> Result<(), Self::Error> {
+        self.0.wait_for_ready().map_err(&self.1)
     }
 }
 pub(crate) trait VrExt: Sized {
@@ -1464,8 +1470,10 @@ impl Vr for OpenXr {
         let view_poses = if !view_state_flags.contains(ViewStateFlags::ORIENTATION_VALID)
             || !view_state_flags.contains(ViewStateFlags::POSITION_VALID)
         {
+            log::trace!("view_state_flags: {:?}", view_state_flags);
             self.saved_poses
         } else {
+            log::trace!("update pose");
             let poses = [0, 1].map(|id| posef_to_nalgebra(views[id].pose));
             self.saved_poses = poses;
             poses
@@ -1543,14 +1551,14 @@ impl Vr for OpenXr {
             &self.space,
             self.display_mode.is_stereo(),
         ) {
-            log::debug!("reuse last image {:?}", frame_state.predicted_display_time);
+            log::trace!("reuse last image {:?}", frame_state.predicted_display_time);
             self.frame_stream.end(
                 frame_state.predicted_display_time,
                 EnvironmentBlendMode::OPAQUE,
                 &[&left, &right],
             )?;
         } else {
-            log::debug!("no saved overlay pose");
+            log::trace!("no saved overlay pose");
             self.frame_stream.end(
                 frame_state.predicted_display_time,
                 EnvironmentBlendMode::OPAQUE,
@@ -1729,5 +1737,32 @@ impl Vr for OpenXr {
                 .state(&self.session, openxr::Path::NULL)?,
         }
         .current_state)
+    }
+
+    fn wait_for_ready(&mut self) -> Result<(), Self::Error> {
+        log::debug!("current state {:?}", self.session_state);
+        while self.session_state != openxr::SessionState::FOCUSED
+            && self.session_state != openxr::SessionState::VISIBLE
+            && self.session_state != openxr::SessionState::SYNCHRONIZED
+            && self.session_state != openxr::SessionState::READY
+        {
+            log::debug!("VR runtime not ready");
+            self.poll_next_event()?;
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        while self.session_state != openxr::SessionState::SYNCHRONIZED
+            && self.session_state != openxr::SessionState::FOCUSED
+            && self.session_state != openxr::SessionState::VISIBLE
+        {
+            let frame_state = self.frame_state.insert(self.frame_waiter.wait()?);
+            self.frame_stream.begin()?;
+            self.frame_stream.end(
+                frame_state.predicted_display_time,
+                EnvironmentBlendMode::OPAQUE,
+                &[],
+            )?;
+            self.poll_next_event()?;
+        }
+        Ok(())
     }
 }
