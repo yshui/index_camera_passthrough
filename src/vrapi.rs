@@ -755,6 +755,8 @@ impl Vr for OpenVr {
         false
     }
     fn refresh(&mut self) -> Result<(), Self::Error> {
+        // We can only reach here if the overlay is not visible
+        std::thread::sleep(std::time::Duration::from_millis(100));
         Ok(())
     }
     fn set_display_mode(&mut self, mode: DisplayMode) -> Result<(), Self::Error> {
@@ -931,7 +933,6 @@ pub(crate) struct OpenXr {
     camera_config: Option<StereoCamera>,
 
     session_state: openxr::SessionState,
-    session_running: bool,
     session: openxr::Session<openxr::Vulkan>,
     frame_waiter: openxr::FrameWaiter,
     frame_stream: openxr::FrameStream<openxr::Vulkan>,
@@ -1380,7 +1381,6 @@ impl OpenXr {
             action_set,
 
             session_state: openxr::SessionState::IDLE,
-            session_running: false,
             session,
             frame_waiter,
             frame_stream,
@@ -1530,10 +1530,11 @@ impl Vr for OpenXr {
     }
 
     fn refresh(&mut self) -> Result<(), Self::Error> {
-        if !self.session_running {
+        log::trace!("refresh");
+        if !self.overlay_visible {
+            std::thread::sleep(std::time::Duration::from_millis(100));
             return Ok(());
         }
-        log::trace!("refresh");
         let frame_state = self.frame_state.insert(self.frame_waiter.wait()?);
         self.frame_stream.begin()?;
         if let Some((left, right)) = Self::composition_layers(
@@ -1542,12 +1543,14 @@ impl Vr for OpenXr {
             &self.space,
             self.display_mode.is_stereo(),
         ) {
+            log::debug!("reuse last image {:?}", frame_state.predicted_display_time);
             self.frame_stream.end(
                 frame_state.predicted_display_time,
                 EnvironmentBlendMode::OPAQUE,
                 &[&left, &right],
             )?;
         } else {
+            log::debug!("no saved overlay pose");
             self.frame_stream.end(
                 frame_state.predicted_display_time,
                 EnvironmentBlendMode::OPAQUE,
@@ -1558,7 +1561,13 @@ impl Vr for OpenXr {
     }
 
     fn get_render_texture(&mut self) -> Result<Option<Arc<Image>>, Self::Error> {
-        if !self.session_running {
+        if (self.session_state != openxr::SessionState::FOCUSED
+            && self.session_state != openxr::SessionState::VISIBLE
+            && self.session_state != openxr::SessionState::SYNCHRONIZED
+            && self.session_state != openxr::SessionState::READY)
+            || !self.overlay_visible
+        {
+            log::debug!("VR runtime not ready");
             return Ok(None);
         }
         let frame_state = self.frame_state.insert(self.frame_waiter.wait()?);
@@ -1572,9 +1581,11 @@ impl Vr for OpenXr {
             return Ok(None);
         }
         if self.display_mode.projection_mode().is_some() {
+            log::trace!("render to intermediate texture");
             assert!(self.render_texture.is_some());
             return Ok(self.render_texture.clone());
         }
+        log::trace!("render to swapchain image");
         let image = self.swapchain.acquire_image()? as usize;
         self.render_texture = Some(self.swapchain_images[image].clone());
         self.swapchain.wait_image(openxr::Duration::INFINITE)?;
@@ -1607,28 +1618,15 @@ impl Vr for OpenXr {
     }
 
     fn show_overlay(&mut self) -> Result<(), Self::Error> {
-        self.overlay_visible = true;
-        log::debug!("show overlay, {:?}", self.session_state);
-        if self.session_state == openxr::SessionState::READY && !self.session_running {
-            match self
-                .session
-                .begin(openxr::ViewConfigurationType::PRIMARY_STEREO)
-            {
-                Err(openxr::sys::Result::ERROR_SESSION_RUNNING) => {
-                    // HACK: workaround monado bug?
-                    log::debug!("ignoring ERROR_SESSION_RUNNING");
-                    Ok(openxr::sys::Result::SUCCESS)
-                }
-                r @ _ => r,
-            }?;
-            self.session_running = true;
+        if !self.overlay_visible {
+            log::debug!("show overlay, {:?}", self.session_state);
+            self.overlay_visible = true;
         }
         Ok(())
     }
 
     fn hide_overlay(&mut self) -> Result<(), Self::Error> {
-        self.overlay_visible = false;
-        if self.session_running {
+        if self.overlay_visible {
             // HACK!: show a zero sized quad to hide the overlay. It's a bit ugly we
             // blocks the mainloop here to wait for a frame
             let frame_state = self.frame_waiter.wait()?;
@@ -1657,19 +1655,9 @@ impl Vr for OpenXr {
                 EnvironmentBlendMode::OPAQUE,
                 &[&empty],
             )?;
-            self.session_state = openxr::SessionState::READY;
-            self.session_running = false;
-            match self.session.end() {
-                Err(openxr::sys::Result::ERROR_SESSION_NOT_STOPPING) => {
-                    log::debug!("ignoring ERROR_SESSION_NOT_STOPPING");
-                    Ok(openxr::sys::Result::SUCCESS)
-                }
-                r @ _ => r,
-            }?;
-            Ok(())
-        } else {
-            Ok(())
+            self.overlay_visible = false;
         }
+        Ok(())
     }
 
     fn set_position_mode(&mut self, mode: PositionMode) -> Result<(), Self::Error> {
@@ -1702,12 +1690,9 @@ impl Vr for OpenXr {
                             break Some(Event::RequestExit);
                         }
                         SessionState::READY => {
-                            if self.overlay_visible {
-                                log::debug!("begin session");
-                                self.session
-                                    .begin(openxr::ViewConfigurationType::PRIMARY_STEREO)?;
-                                self.session_running = true;
-                            }
+                            log::debug!("begin session");
+                            self.session
+                                .begin(openxr::ViewConfigurationType::PRIMARY_STEREO)?;
                         }
                         SessionState::STOPPING => {
                             if self.overlay_visible {

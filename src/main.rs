@@ -251,6 +251,43 @@ impl CameraThread {
     }
 }
 
+/// Get the next camera frame. If the next frame is not available, this function
+/// will block on `wait` until it is; unless `wait` is None, in which case it
+/// will return immediately.
+fn next_camera_frame<'a>(
+    shared_frame: &'_ Mutex<Option<FrameInfo>>,
+    maybe_frame: &'a mut Option<FrameInfo>,
+    wait: Option<&'_ std::sync::Condvar>,
+) -> Option<&'a mut FrameInfo> {
+    let mut other_frame = shared_frame.lock().unwrap();
+    let mut frame_changed = false;
+    while !frame_changed {
+        let new_frame_elapsed = other_frame.as_ref().map(|new_frame| new_frame.frame_time);
+        let current_frame_elapsed = maybe_frame
+            .as_ref()
+            .map(|current_frame| current_frame.frame_time);
+        frame_changed = new_frame_elapsed > current_frame_elapsed;
+        if frame_changed {
+            std::mem::swap(maybe_frame, &mut *other_frame);
+            log::trace!("frame changed");
+        } else if let Some(wait) = wait {
+            other_frame = wait.wait(other_frame).unwrap();
+        } else {
+            break;
+        }
+    }
+    drop(other_frame);
+    if maybe_frame.is_none() {
+        // This should never happen, because we should at least have the splash screen
+        log::error!("No frame");
+    }
+    if frame_changed {
+        Some(maybe_frame.as_mut().unwrap())
+    } else {
+        None
+    }
+}
+
 fn main() -> Result<()> {
     let xdg = xdg::BaseDirectories::with_prefix("index_camera_passthrough")?;
     first_run(&xdg)?;
@@ -358,85 +395,70 @@ fn main() -> Result<()> {
     let mut frame_changed = false;
     let is_synchronized = vrsys.is_synchronized();
     loop {
-        // If synchronized, get the new frame if available, and refresh with existing frame if not;
-        // otherwise wait for the next frame.
-        if ui_state.is_visible() {
-            let mut other_frame = frame.lock().unwrap();
-            while !frame_changed {
-                let new_frame_elapsed = other_frame.as_ref().map(|new_frame| new_frame.frame_time);
-                let current_frame_elapsed = maybe_current_frame
-                    .as_ref()
-                    .map(|current_frame| current_frame.frame_time);
-                frame_changed = new_frame_elapsed > current_frame_elapsed;
-                if frame_changed {
-                    std::mem::swap(&mut maybe_current_frame, &mut *other_frame);
-                    log::trace!("frame changed");
-                } else if is_synchronized {
-                    // Don't wait if we are obliged to synchronize with VR runtime
-                    break;
+        let next_frame = if ui_state.is_visible() {
+            // Try to get the next camera frame if the overlay is visible
+            next_camera_frame(
+                &frame,
+                &mut maybe_current_frame,
+                if is_synchronized {
+                    // Don't wait if we are obliged to synchronize with the VR runtime
+                    None
                 } else {
-                    other_frame = notify_new_frame.wait(other_frame).unwrap();
-                }
-            }
-            drop(other_frame);
-            let Some(current_frame) = maybe_current_frame.as_ref() else {
-                // Should never happen, because we should at least have the splash screen
-                log::error!("No frame");
-                continue;
-            };
-            // log::debug!("frame bypass pipeline: {}", current_frame.bypass_pipeline);
+                    Some(&notify_new_frame)
+                },
+            )
+        } else {
+            None
+        };
+
+        if let Some(current_frame) = next_frame {
+            // We try to get the pose at the time when the camera frame is captured. GetDeviceToAbsoluteTrackingPose
+            // doesn't specifically say if a negative time offset will work...
+            // also, do this as early as possible.
+            let elapsed = current_frame
+                .frame_time
+                .map(|frame_time| std::time::Instant::now() - frame_time)
+                .unwrap_or_default();
+            log::trace!("elapsed: {elapsed:?}");
+            // Allocate final image
+            log::debug!("frame bypass pipeline: {}", current_frame.bypass_pipeline);
+            // Display mode must be known before we call `get_render_texture`.
             if current_frame.bypass_pipeline {
                 vrsys.set_display_mode(config::DisplayMode::Direct)?;
             } else {
                 vrsys.set_display_mode(cfg.display_mode)?;
             }
-
-            if frame_changed {
-                // We try to get the pose at the time when the camera frame is captured. GetDeviceToAbsoluteTrackingPose
-                // doesn't specifically say if a negative time offset will work...
-                // also, do this as early as possible.
-                let elapsed = current_frame
-                    .frame_time
-                    .map(|frame_time| std::time::Instant::now() - frame_time)
-                    .unwrap_or_default();
-                log::trace!("elapsed: {elapsed:?}");
-                // Allocate final image
-                if let Some(output) = vrsys.get_render_texture()? {
-                    if current_frame.bypass_pipeline {
-                        let future = pipeline.submit_cpu_image(
-                            &current_frame.frame,
-                            vrsys.vk_command_buffer_allocator(),
-                            &queue,
-                            output,
-                        )?;
-                        future.flush()?;
-                        future.then_signal_fence().wait(None)?;
-                    } else {
-                        let future = pipeline.run(
-                            &queue,
-                            vrsys.vk_allocator(),
-                            vrsys.vk_command_buffer_allocator(),
-                            &current_frame.frame,
-                            output.clone(),
-                        )?;
-                        //println!("submission: {:?}", submission);
-                        future.flush()?; // can't use then_signal_fence_and_flush() because of a vulkano bug
-                        future.then_signal_fence().wait(None)?;
-                    }
-
-                    // Submit the texture
-                    vrsys.submit_texture(elapsed, &pipeline.fov())?;
-                    frame_changed = false;
+            if let Some(output) = vrsys.get_render_texture()? {
+                if current_frame.bypass_pipeline {
+                    let future = pipeline.submit_cpu_image(
+                        &current_frame.frame,
+                        vrsys.vk_command_buffer_allocator(),
+                        &queue,
+                        output,
+                    )?;
+                    future.flush()?;
+                    future.then_signal_fence().wait(None)?;
+                } else {
+                    let future = pipeline.run(
+                        &queue,
+                        vrsys.vk_allocator(),
+                        vrsys.vk_command_buffer_allocator(),
+                        &current_frame.frame,
+                        output.clone(),
+                    )?;
+                    //println!("submission: {:?}", submission);
+                    future.flush()?; // can't use then_signal_fence_and_flush() because of a vulkano bug
+                    future.then_signal_fence().wait(None)?;
                 }
-            } else {
-                vrsys.refresh()?;
+
+                // Submit the texture
+                vrsys.submit_texture(elapsed, &pipeline.fov())?;
+                frame_changed = false;
             }
-        } else if !is_synchronized {
-            // Not synchronized, and we didn't wait for new camera frame because we are not visible.
-            // We have to throttle our main loop.
-            std::thread::sleep(std::time::Duration::from_millis(100));
         } else {
-            // Synchronize with VR Runtime.
+            // If we don't have a frame, this means either the overlay is not visible, or
+            // the VR runtime is a synchronized runtime so we didn't block wait for the frame.
+            assert!(!ui_state.is_visible() || is_synchronized);
             vrsys.refresh()?;
         }
 
