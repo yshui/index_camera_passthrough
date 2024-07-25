@@ -19,7 +19,7 @@ impl Default for ProjectionMode {
         Self::FromCamera
     }
 }
-pub const fn default_overlay_distance() -> f32 {
+pub const fn default_quad_distance() -> f32 {
     1.0
 }
 fn serialize_transform<S>(transform: &Affine3<f32>, serializer: S) -> Result<S::Ok, S::Error>
@@ -43,26 +43,26 @@ where
 #[derive(PartialEq, Debug, Serialize, Deserialize, Clone, Copy)]
 #[serde(tag = "mode")]
 pub enum PositionMode {
-    /// the overlay is shown right in front of your HMD
+    /// the quad is shown right in front of your HMD
     Hmd {
-        /// how far away should the overlay be
-        #[serde(default = "default_overlay_distance")]
+        /// how far away should the quad be
+        #[serde(default = "default_quad_distance")]
         distance: f32,
     },
-    /// the overlay will stick to a fixed position in world space, but it can be repositioned
+    /// the quad will stick to a fixed position in world space, but it can be repositioned
     /// by pressing the repositioning button
     Sticky {
-        /// how far away from your face should the overlay be, when you reposition the overlay.
-        #[serde(default = "default_overlay_distance")]
+        /// how far away from your face should the quad be, when you reposition the quad.
+        #[serde(default = "default_quad_distance")]
         distance: f32,
 
         /// internal use, the position to stick to
         #[serde(skip)]
         transform: Affine3<f32>,
     },
-    /// the overlay is at a fixed location in space
+    /// the quad is at a fixed location in space
     Absolute {
-        /// transformation matrix for the overlay
+        /// transformation matrix for the quad
         #[serde(
             serialize_with = "serialize_transform",
             deserialize_with = "deserialize_transform"
@@ -128,15 +128,15 @@ pub const fn default_display_eye() -> Eye {
 pub enum DisplayMode {
     #[default]
     Direct,
-    /// display a stereo image on the overlay. conceptually the overlay becomes a portal from VR
-    /// space to real world. you will be able to see more of the real world if the overlay occupys
+    /// display a stereo image on the quad. conceptually the quad becomes a portal from VR
+    /// space to real world. you will be able to see more of the real world if the quad occupys
     /// more of your field of view.
     Stereo {
-        /// how is the camera's image projected onto the overlay
+        /// how is the camera's image projected onto the quad
         #[serde(default)]
         projection_mode: ProjectionMode,
     },
-    /// display one of the camera's image on the overlay
+    /// display one of the camera's image on the quad
     Flat {
         /// which camera's image to display
         #[serde(default = "default_display_eye")]
@@ -158,9 +158,10 @@ impl DisplayMode {
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct OverlayConfig {
-    /// how is the overlay positioned
-    #[serde(default)]
-    pub position: PositionMode,
+    /// z order of the quad. higher z order means the quad is on top of
+    /// other quads. Not supported on all backends, supported on OpenXR.
+    #[serde(default = "default_z_order")]
+    pub z_order: u32,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy)]
@@ -251,22 +252,21 @@ pub struct Config {
     pub camera_device: String,
     /// overlay related configuration
     #[serde(default)]
-    pub overlay: OverlayConfig,
-    /// how is the camera view displayed on the overlay
+    pub overlay: Option<OverlayConfig>,
+    /// how is the quad positioned
+    #[serde(default)]
+    pub position: PositionMode,
+    /// how is the camera view displayed on the quad
     #[serde(default)]
     pub display_mode: DisplayMode,
-    /// which button should toggle the overlay visibility. press things
-    /// button on both controllers to toggle the overlay.
+    /// which button should toggle the quad visibility. press things
+    /// button on both controllers to toggle the quad.
     #[serde(default = "default_toggle_button")]
     pub toggle_button: Button,
-    /// how long does the button need to be held before the overlay open,
-    /// closing the overlay is always instantaneous
+    /// how long does the button need to be held before the quad open,
+    /// closing the quad is always instantaneous
     #[serde(default = "default_open_delay", with = "humantime_serde")]
     pub open_delay: std::time::Duration,
-    /// z order of the overlay. higher z order means the overlay is on top of
-    /// other overlays. Not supported on all backends, supported on OpenXR.
-    #[serde(default = "default_z_order")]
-    pub z_order: u32,
     /// enable debug option, including:
     ///   - use trigger button to do renderdoc capture
     #[serde(default)]
@@ -277,13 +277,17 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             camera_device: "".to_owned(),
-            backend: Default::default(),
-            overlay: Default::default(),
+            #[cfg(feature = "openvr")]
+            backend: Backend::OpenVR,
+            #[cfg(feature = "openxr")]
+            #[cfg(not(feature = "openvr"))]
+            backend: Backend::OpenXR,
+            overlay: Some(Default::default()),
+            position: Default::default(),
             display_mode: Default::default(),
             toggle_button: default_toggle_button(),
             open_delay: std::time::Duration::ZERO,
             debug: false,
-            z_order: default_z_order(),
         }
     }
 }

@@ -49,7 +49,7 @@ use crate::APP_KEY;
 #[cfg(feature = "openxr")]
 use crate::CAMERA_SIZE;
 use crate::{
-    config::{DisplayMode, Eye, PositionMode},
+    config::{DisplayMode, Eye, OverlayConfig, PositionMode},
     utils::DeviceExt,
     APP_NAME,
 };
@@ -1221,7 +1221,7 @@ impl OpenXr {
         })
     }
 
-    pub(crate) fn new(placement: u32) -> Result<Self, OpenXrError> {
+    pub(crate) fn new(overlay_order: Option<&OverlayConfig>) -> Result<Self, OpenXrError> {
         let entry = unsafe { openxr::Entry::load()? };
         let mut extension = openxr::ExtensionSet::default();
         extension.extx_overlay = true;
@@ -1258,15 +1258,17 @@ impl OpenXr {
         ));
 
         let action_set = instance.create_action_set("main", "main", 0)?;
-        let overlay = openxr::sys::SessionCreateInfoOverlayEXTX {
+        let overlay = overlay_order.map(|config| openxr::sys::SessionCreateInfoOverlayEXTX {
             ty: openxr::sys::SessionCreateInfoOverlayEXTX::TYPE,
             next: std::ptr::null(),
             create_flags: OverlaySessionCreateFlagsEXTX::EMPTY,
-            session_layers_placement: placement,
-        };
+            session_layers_placement: config.z_order,
+        });
         let binding = openxr::sys::GraphicsBindingVulkanKHR {
             ty: openxr::sys::GraphicsBindingVulkanKHR::TYPE,
-            next: &overlay as *const _ as *const _,
+            next: overlay
+                .map(|o| &o as *const _ as *const _)
+                .unwrap_or(std::ptr::null()),
             instance: vk_instance.handle().as_raw() as _,
             physical_device: device.physical_device().handle().as_raw() as _,
             device: device.handle().as_raw() as _,

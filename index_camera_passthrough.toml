@@ -1,3 +1,5 @@
+backend = "openxr"
+
 ## This is the configuration file for index_camera_passthrough.
 ## This file should live at ~/.config/index_camera_passthrough.toml
 
@@ -12,11 +14,12 @@ camera_device = ""
 ## closing the overlay is always instantaneous
 open_delay = "0s"
 
-## z order of the overlay. higher z order means the overlay is on top of
-## other overlays. Not supported on all backends, supported on OpenXR.
-z_order = 4294967295
+# [overlay]
+# ## z order of the overlay. higher z order means the overlay is on top of
+# ## other overlays. Not supported on all backends, supported on OpenXR.
+# z_order = 0
 
-[overlay.position]
+[position]
 ## how will the overlay be positioned.
 ## possible values:
 ##   - "Hmd":      stay in front of your Hmd
@@ -26,7 +29,7 @@ mode = "Hmd"
 
 ## how far away should the overlay be placed
 ## only meaningful if mode is "Hmd" or "Sticky"
-distance = 1.0
+distance = 0.75
 
 ## transformation matrix for absolute position, column-major
 ## only meaningful if mode is "Absolute"
@@ -38,7 +41,7 @@ distance = 1.0
 ##   - "Stereo": show a 3D image, how much you can see is limited by how
 ##               big the overlay is in your field of view.
 ##   - "Flat":   show a flat image
-mode = "Flat"
+mode = "Stereo"
 
 ## which camera's image to display in Flat mode
 ## only meaningful if mode is "Flat"
@@ -51,11 +54,10 @@ eye = "Left"
 ## possible values:
 ## (a smaller viewing range here means things too close to you will give you double vision).
 ##
-##   - "FromCamera": in this mode, we assume your eyes are at the cameras' physical location. this mode 
+##   - "FromCamera": in this mode, we assume your eyes are at the cameras' physical location. this mode
 ##                   has larger viewing range, but everything will look smaller to you.
 ##   - "FromEye":    in this mode, we assume your cameras are at your eyes' physical location. everything will
 ##                   have the right scale in this mode, but the viewing range is smaller.
 ##
 ## only available if mode is "Stereo"
-# projection_mode = "FromCamera"
-
+projection_mode = "FromEye"

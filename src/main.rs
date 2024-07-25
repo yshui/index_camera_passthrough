@@ -349,7 +349,7 @@ fn main() -> Result<()> {
         #[cfg(feature = "openvr")]
         Backend::OpenVR => crate::vrapi::OpenVr::new(&xdg)?.boxed(),
         #[cfg(feature = "openxr")]
-        Backend::OpenXR => crate::vrapi::OpenXr::new(cfg.z_order)?.boxed(),
+        Backend::OpenXR => crate::vrapi::OpenXr::new(cfg.overlay.as_ref())?.boxed(),
     };
     let instance = vrsys.vk_instance();
     let (device, queue) = vrsys.vk_device(&instance);
@@ -370,7 +370,7 @@ fn main() -> Result<()> {
         None
     };
 
-    vrsys.set_position_mode(cfg.overlay.position)?;
+    vrsys.set_position_mode(cfg.position)?;
 
     // Show overlay
     log::debug!("showing overlay");
@@ -521,7 +521,7 @@ fn main() -> Result<()> {
             _ => (),
         }
         if vrsys.get_action_state(vrapi::Action::Reposition)? {
-            vrsys.set_position_mode(cfg.overlay.position)?;
+            vrsys.set_position_mode(cfg.position)?;
         }
     }
     camera_thread.join().unwrap()?;
